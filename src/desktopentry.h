@@ -36,11 +36,16 @@ private:
     DesktopApps() = default;
     QStringList candidatesFor(const QString &mime) const;
 
+    // One mimeapps.list, in precedence order (user config first).
+    struct Level {
+        QHash<QString, QStringList> defaults;
+        QHash<QString, QStringList> added;
+        QHash<QString, QSet<QString>> removed;
+    };
+
     bool m_loaded = false;
     QHash<QString, DesktopApp> m_apps;
-    QHash<QString, QStringList> m_defaults;
-    QHash<QString, QStringList> m_added;
-    QHash<QString, QSet<QString>> m_removed;
+    QList<Level> m_levels;
     QHash<QString, QStringList> m_byMime;
 };
 

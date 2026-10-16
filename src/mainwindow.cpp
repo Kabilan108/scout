@@ -62,6 +62,17 @@ bool parseBool(const QString &value, bool current) {
            v == QLatin1String("1");
 }
 
+// Renames without ever replacing an existing entry, dangling symlinks included.
+QString renamePath(const QString &from, const QString &to) {
+    struct stat st {};
+    if (lstat(QFile::encodeName(to).constData(), &st) == 0)
+        return QStringLiteral("%1 already exists").arg(baseName(to));
+    const int err = renameNoReplace(from, to);
+    if (err == EEXIST)
+        return QStringLiteral("%1 already exists").arg(baseName(to));
+    return err == 0 ? QString() : QStringLiteral("rename failed: %1").arg(QString::fromLocal8Bit(strerror(err)));
+}
+
 qint64 treeSize(const QString &path) {
     struct stat st {};
     const QByteArray enc = QFile::encodeName(path);
@@ -397,6 +408,11 @@ void MainWindow::onCurrentRefreshed() {
     } else {
         setCursor(row);
     }
+    // A filter that hides the remembered entry shouldn't make us forget it.
+    const bool hiddenByFilter = !want.isEmpty() && m_currentModel->rowOf(want) < 0 &&
+                                !m_currentModel->filter().isEmpty();
+    if (hiddenByFilter)
+        m_lastSelected[m_cwd] = want;
     m_previewTimer.stop();
     updatePreview();
 }
@@ -915,12 +931,8 @@ void MainWindow::promptRename() {
             return;
         const QString from = QDir(m_cwd).filePath(oldName);
         const QString to = QDir::cleanPath(QDir(m_cwd).filePath(expandHome(name)));
-        if (QFileInfo::exists(to)) {
-            error(QStringLiteral("%1 already exists").arg(name));
-            return;
-        }
-        if (::rename(QFile::encodeName(from).constData(), QFile::encodeName(to).constData()) != 0) {
-            error(QStringLiteral("rename failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+        if (const QString problem = renamePath(from, to); !problem.isEmpty()) {
+            error(problem);
             return;
         }
         if (parentDir(to) == m_cwd) {
@@ -1488,9 +1500,9 @@ void MainWindow::registerCommands() {
         const FileEntry *e = currentEntry();
         if (!e)
             return;
-        const QString to = QDir(m_cwd).filePath(c.args.join(u' '));
-        if (QFileInfo::exists(to) || !QFile::rename(e->path, to)) {
-            error(QStringLiteral("rename failed"));
+        const QString to = QDir::cleanPath(QDir(m_cwd).filePath(expandHome(c.args.join(u' '))));
+        if (const QString problem = renamePath(e->path, to); !problem.isEmpty()) {
+            error(problem);
             return;
         }
         m_pendingSelect = baseName(to);

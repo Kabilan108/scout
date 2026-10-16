@@ -8,6 +8,7 @@
 #include <QThreadPool>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
@@ -107,7 +108,58 @@ QString uniqueDestination(const QString &dir, const QString &name) {
         if (lstat(QFile::encodeName(candidate).constData(), &st) != 0)
             return candidate;
     }
-    return joinPath(dir, name + QStringLiteral(".copy"));
+    return {};
+}
+
+int renameNoReplace(const QString &from, const QString &to) {
+    const QByteArray f = QFile::encodeName(from), t = QFile::encodeName(to);
+    if (renameat2(AT_FDCWD, f.constData(), AT_FDCWD, t.constData(), RENAME_NOREPLACE) == 0)
+        return 0;
+    if (errno != EINVAL && errno != ENOSYS && errno != EOPNOTSUPP)
+        return errno;
+    // Filesystems without RENAME_NOREPLACE: link() refuses to replace, rename() does not.
+    struct stat st {};
+    if (lstat(f.constData(), &st) != 0)
+        return errno;
+    if (!S_ISDIR(st.st_mode)) {
+        if (link(f.constData(), t.constData()) == 0)
+            return unlink(f.constData()) == 0 ? 0 : errno;
+        if (errno == EEXIST)
+            return EEXIST;
+    }
+    if (lstat(t.constData(), &st) == 0)
+        return EEXIST;
+    return ::rename(f.constData(), t.constData()) == 0 ? 0 : errno;
+}
+
+QString moveToUnique(const QString &from, const QString &dir, const QString &name, int *errorNumber) {
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        const QString dest = uniqueDestination(dir, name);
+        if (dest.isEmpty())
+            break;
+        const int err = renameNoReplace(from, dest);
+        if (err == 0)
+            return dest;
+        if (err != EEXIST) {
+            *errorNumber = err;
+            return {};
+        }
+    }
+    *errorNumber = EEXIST;
+    return {};
+}
+
+bool isSameOrInside(const QString &dir, const QString &folder) {
+    if (dir == folder || dir.startsWith(folder + u'/'))
+        return true;
+    struct stat st {};
+    // Moving or copying a symlink never recurses into its target.
+    if (lstat(QFile::encodeName(folder).constData(), &st) != 0 || !S_ISDIR(st.st_mode))
+        return false;
+    const QString realDir = QFileInfo(dir).canonicalFilePath();
+    const QString realFolder = QFileInfo(folder).canonicalFilePath();
+    return !realDir.isEmpty() && !realFolder.isEmpty() &&
+           (realDir == realFolder || realDir.startsWith(realFolder + u'/'));
 }
 
 Task::Task(Kind kind, QStringList sources, QString targetDir, QObject *parent)
@@ -284,36 +336,91 @@ public:
         return false;
     }
 
-    bool removeTree(const QString &path) {
+    // Deletes through directory descriptors opened with O_NOFOLLOW, so a folder
+    // swapped for a symlink mid-delete can't redirect us into another tree.
+    bool removeTree(const QString &path, bool honorCancel = true) {
+        const QByteArray parent = QFile::encodeName(parentOf(path));
+        const int parentFd = open(parent.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (parentFd < 0) {
+            error(path, errnoString());
+            return false;
+        }
+        const bool ok = removeAt(parentFd, QFile::encodeName(baseName(path)), path, honorCancel);
+        close(parentFd);
+        return ok;
+    }
+
+    bool removeAt(int parentFd, const QByteArray &name, const QString &display, bool honorCancel) {
         struct stat st {};
-        const QByteArray p = QFile::encodeName(path);
-        if (lstat(p.constData(), &st) != 0) {
-            error(path, errnoString());
+        if (fstatat(parentFd, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            error(display, errnoString());
             return false;
         }
-        if (S_ISDIR(st.st_mode)) {
-            QString err;
-            bool ok = true;
-            for (const QString &child : childNames(p, &err)) {
-                if (m_cancelled())
-                    return false;
-                ok = removeTree(joinPath(path, child)) && ok;
-            }
-            if (!err.isEmpty()) {
-                error(path, err);
+        if (!S_ISDIR(st.st_mode)) {
+            if (unlinkat(parentFd, name.constData(), 0) != 0) {
+                error(display, errnoString());
                 return false;
             }
-            if (ok && rmdir(p.constData()) != 0) {
-                error(path, errnoString());
-                return false;
-            }
-            return ok;
+            return true;
         }
-        if (unlink(p.constData()) != 0) {
-            error(path, errnoString());
+        const int fd = openat(parentFd, name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) {
+            error(display, errnoString());
             return false;
         }
-        return true;
+        struct stat opened {};
+        if (fstat(fd, &opened) != 0 || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino) {
+            close(fd);
+            error(display, QStringLiteral("changed while deleting"));
+            return false;
+        }
+        DIR *dir = fdopendir(fd);
+        if (!dir) {
+            close(fd);
+            error(display, errnoString());
+            return false;
+        }
+        std::vector<QByteArray> children;
+        while (dirent *de = readdir(dir)) {
+            if (strcmp(de->d_name, ".") != 0 && strcmp(de->d_name, "..") != 0)
+                children.emplace_back(de->d_name);
+        }
+        bool ok = true;
+        for (const QByteArray &child : children) {
+            if (honorCancel && m_cancelled()) {
+                closedir(dir);
+                return false;
+            }
+            ok = removeAt(dirfd(dir), child, display + u'/' + QFile::decodeName(child), honorCancel) && ok;
+        }
+        closedir(dir);
+        if (ok && unlinkat(parentFd, name.constData(), AT_REMOVEDIR) != 0) {
+            error(display, errnoString());
+            return false;
+        }
+        return ok;
+    }
+
+    // Copies into a hidden sibling and renames it into place only on success,
+    // so failed or cancelled copies leave nothing behind.
+    QString copyIntoPlace(const QString &src, const QString &target) {
+        const QString name = baseName(src);
+        const QString temp = uniqueDestination(target, QStringLiteral(".%1.scout-partial").arg(name));
+        if (temp.isEmpty()) {
+            error(src, QStringLiteral("no free name in %1").arg(target));
+            return {};
+        }
+        if (copyTree(src, temp)) {
+            int err = 0;
+            const QString dest = moveToUnique(temp, target, name, &err);
+            if (!dest.isEmpty())
+                return dest;
+            error(src, QString::fromLocal8Bit(strerror(err)));
+        }
+        struct stat st {};
+        if (lstat(QFile::encodeName(temp).constData(), &st) == 0)
+            removeTree(temp, false);
+        return {};
     }
 
 private:
@@ -347,32 +454,43 @@ void Task::run() {
         case Copy:
         case Move:
         case Link: {
-            if (m_kind != Link && (target == src || target.startsWith(src + u'/'))) {
+            if (m_kind != Link && isSameOrInside(target, src)) {
                 worker.error(src, QStringLiteral("cannot put a folder inside itself"));
                 break;
             }
             if (m_kind == Move && parentOf(src) == target)
                 break;
-            const QString dest = uniqueDestination(target, baseName(src));
-            bool ok = false;
+            QString dest;
             if (m_kind == Copy) {
-                ok = worker.copyTree(src, dest);
+                dest = worker.copyIntoPlace(src, target);
             } else if (m_kind == Link) {
-                ok = symlink(s.constData(), QFile::encodeName(dest).constData()) == 0;
-                if (!ok)
-                    worker.error(dest, errnoString());
-            } else if (::rename(s.constData(), QFile::encodeName(dest).constData()) == 0) {
-                ok = true;
-            } else if (errno == EXDEV) {
-                qint64 bytes = 0;
-                int items = 0;
-                measure(src, &bytes, &items);
-                update([&](Progress &p) { p.totalBytes += bytes; });
-                ok = worker.copyTree(src, dest) && worker.removeTree(src);
+                for (int attempt = 0; attempt < 64 && dest.isEmpty(); ++attempt) {
+                    const QString candidate = uniqueDestination(target, baseName(src));
+                    if (candidate.isEmpty())
+                        break;
+                    if (symlink(s.constData(), QFile::encodeName(candidate).constData()) == 0)
+                        dest = candidate;
+                    else if (errno != EEXIST)
+                        break;
+                }
+                if (dest.isEmpty())
+                    worker.error(src, errnoString());
             } else {
-                worker.error(src, errnoString());
+                int err = 0;
+                dest = moveToUnique(src, target, baseName(src), &err);
+                if (dest.isEmpty() && err == EXDEV) {
+                    qint64 bytes = 0;
+                    int items = 0;
+                    measure(src, &bytes, &items);
+                    update([&](Progress &p) { p.totalBytes += bytes; });
+                    dest = worker.copyIntoPlace(src, target);
+                    if (!dest.isEmpty() && !worker.removeTree(src, false))
+                        worker.error(src, QStringLiteral("copied, but the original could not be fully removed"));
+                } else if (dest.isEmpty()) {
+                    worker.error(src, QString::fromLocal8Bit(strerror(err)));
+                }
             }
-            if (ok)
+            if (!dest.isEmpty())
                 update([&](Progress &p) { p.created << dest; });
             break;
         }
@@ -409,7 +527,13 @@ TaskManager::TaskManager(QObject *parent) : QObject(parent) {
 TaskManager::~TaskManager() {
     for (Task *t : m_tasks)
         t->cancel();
-    taskPool()->waitForDone(5000);
+    taskPool()->clear();
+    if (taskPool()->waitForDone(5000))
+        return;
+    // A worker is stuck in a syscall. Leak its task rather than free memory it still uses.
+    for (Task *t : m_tasks)
+        if (!m_delivered.contains(t))
+            t->setParent(nullptr);
 }
 
 Task *TaskManager::start(Task::Kind kind, const QStringList &sources, const QString &targetDir) {

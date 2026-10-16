@@ -15,6 +15,10 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <cerrno>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace {
 
 void writeFile(const QString &path, const QByteArray &content = "hello\n") {
@@ -363,6 +367,107 @@ private slots:
         QVERIFY(w.runCommandLine(QStringLiteral("set theme dark")));
         QCoreApplication::processEvents();
         QVERIFY(backgroundLightness() < 0.3);
+    }
+
+    void deleteNeverFollowsSymlinks() {
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/victim/keep.txt"));
+        QDir().mkpath(base + QStringLiteral("/doomed"));
+        QVERIFY(QFile::link(base + QStringLiteral("/victim"), base + QStringLiteral("/doomed/link")));
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Delete, {base + QStringLiteral("/doomed")});
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(t->progress().state, Task::Done);
+        QVERIFY(!QFileInfo::exists(base + QStringLiteral("/doomed")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/victim/keep.txt")));
+    }
+
+    void symlinkAliasCannotCopyIntoItself() {
+        const QString base = makeTree();
+        QVERIFY(QFile::link(base + QStringLiteral("/alpha"), base + QStringLiteral("/alias")));
+        QVERIFY(isSameOrInside(base + QStringLiteral("/alias/inner"), base + QStringLiteral("/alpha")));
+        QVERIFY(!isSameOrInside(base + QStringLiteral("/beta"), base + QStringLiteral("/alpha")));
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Copy, {base + QStringLiteral("/alpha")}, base + QStringLiteral("/alias/inner"));
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(t->progress().state, Task::Failed);
+        QVERIFY(!QFileInfo::exists(base + QStringLiteral("/alpha/inner/alpha")));
+    }
+
+    void renamesNeverReplace() {
+        const QString base = makeTree();
+        const QString a = base + QStringLiteral("/file2.txt"), b = base + QStringLiteral("/file10.txt");
+        QCOMPARE(renameNoReplace(a, b), EEXIST);
+        QVERIFY(QFile::exists(a));
+        QVERIFY(QFile::link(base + QStringLiteral("/missing"), base + QStringLiteral("/dangling")));
+        QCOMPARE(renameNoReplace(a, base + QStringLiteral("/dangling")), EEXIST);
+        QCOMPARE(renameNoReplace(a, base + QStringLiteral("/fresh.txt")), 0);
+
+        // Moving onto an existing name keeps both files.
+        writeFile(base + QStringLiteral("/beta/notes.md"), "original\n");
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        tasks.start(Task::Move, {base + QStringLiteral("/notes.md")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(finished.size(), 1);
+        QFile original(base + QStringLiteral("/beta/notes.md"));
+        QVERIFY(original.open(QIODevice::ReadOnly));
+        QCOMPARE(original.readAll(), QByteArray("original\n"));
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/notes (2).md")));
+    }
+
+    void failedCopyLeavesNothingBehind() {
+        if (geteuid() == 0)
+            QSKIP("root can read unreadable files");
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/src/ok.txt"));
+        writeFile(base + QStringLiteral("/src/secret.txt"));
+        QVERIFY(chmod(QFile::encodeName(base + QStringLiteral("/src/secret.txt")).constData(), 0) == 0);
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Copy, {base + QStringLiteral("/src")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(t->progress().state, Task::Failed);
+        QCOMPARE(QDir(base + QStringLiteral("/beta")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden),
+                 QStringList());
+    }
+
+    void mimeRemovalOnlyAffectsLowerLevels() {
+        const QString apps = m_root.path() + QStringLiteral("/xdg-data/applications");
+        QDir().mkpath(apps);
+        for (const char *id : {"scout-test-a", "scout-test-b"})
+            writeFile(apps + QStringLiteral("/%1.desktop").arg(QLatin1String(id)),
+                      QStringLiteral("[Desktop Entry]\nType=Application\nName=%1\nExec=%1 %f\nMimeType=text/x-scouttest;\n")
+                          .arg(QLatin1String(id))
+                          .toUtf8());
+        const QString sysData = m_root.path() + QStringLiteral("/sys-data");
+        writeFile(sysData + QStringLiteral("/applications/mimeapps.list"),
+                  "[Removed Associations]\ntext/x-scouttest=scout-test-a.desktop;\n");
+        writeFile(m_root.path() + QStringLiteral("/xdg-config/mimeapps.list"),
+                  "[Default Applications]\ntext/x-scouttest=scout-test-b.desktop;\n"
+                  "[Added Associations]\ntext/x-scouttest=scout-test-a.desktop;\n");
+        qputenv("XDG_DATA_DIRS", sysData.toLocal8Bit());
+        DesktopApps::instance().reload();
+        const auto found = DesktopApps::instance().appsFor({QStringLiteral("text/x-scouttest")});
+        QCOMPARE(found.size(), 2);
+        QCOMPARE(found[0].id, QStringLiteral("scout-test-b.desktop"));
+        QCOMPARE(found[1].id, QStringLiteral("scout-test-a.desktop"));
+    }
+
+    void filterKeepsRememberedCursor() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("G"));
+        QCOMPARE(currentName(w), QStringLiteral("notes.md"));
+        keys(w, QStringLiteral("zffile"));
+        key(w, Qt::Key_Return);
+        QTRY_COMPARE(w.currentModel()->rowCount(), 2);
+        key(w, Qt::Key_Escape);
+        QTRY_COMPARE(w.currentModel()->rowCount(), 5);
+        QCOMPARE(currentName(w), QStringLiteral("notes.md"));
     }
 
     void dropCopiesIntoFolder() {

@@ -80,4 +80,11 @@ private:
     QTimer m_poll;
 };
 
+// First free "name", "name (2)", ... in `dir`; empty if none is free.
 QString uniqueDestination(const QString &dir, const QString &name);
+// rename() that fails with EEXIST instead of replacing; returns 0 or an errno.
+int renameNoReplace(const QString &from, const QString &to);
+// Renames `from` into `dir` under the first free variant of `name`.
+QString moveToUnique(const QString &from, const QString &dir, const QString &name, int *errorNumber);
+// True if `dir` is `folder` or below it, following symlinks in `dir`.
+bool isSameOrInside(const QString &dir, const QString &folder);

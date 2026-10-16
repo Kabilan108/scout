@@ -101,9 +101,7 @@ void DesktopApps::reload() {
     m_loaded = true;
     m_apps.clear();
     m_byMime.clear();
-    m_defaults.clear();
-    m_added.clear();
-    m_removed.clear();
+    m_levels.clear();
 
     for (const QString &base : dataDirs()) {
         const QString appsDir = base + QStringLiteral("/applications");
@@ -139,23 +137,35 @@ void DesktopApps::reload() {
         }
     }
 
+    QStringList desktops;
+    for (const QString &d : qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(u':', Qt::SkipEmptyParts))
+        desktops << d.toLower();
     QStringList mimeappsFiles;
-    for (const QString &dir : configDirs())
+    auto addDir = [&](const QString &dir) {
+        for (const QString &d : desktops)
+            mimeappsFiles << dir + u'/' + d + QStringLiteral("-mimeapps.list");
         mimeappsFiles << dir + QStringLiteral("/mimeapps.list");
+    };
+    for (const QString &dir : configDirs())
+        addDir(dir);
     for (const QString &dir : dataDirs())
-        mimeappsFiles << dir + QStringLiteral("/applications/mimeapps.list");
+        addDir(dir + QStringLiteral("/applications"));
     for (const QString &file : mimeappsFiles) {
+        if (!QFileInfo::exists(file))
+            continue;
         const auto groups = parseIni(file);
+        Level level;
         const auto defaults = groups.value(QStringLiteral("Default Applications"));
         for (auto it = defaults.begin(); it != defaults.end(); ++it)
-            m_defaults[it.key()] << splitList(it.value());
+            level.defaults[it.key()] = splitList(it.value());
         const auto added = groups.value(QStringLiteral("Added Associations"));
         for (auto it = added.begin(); it != added.end(); ++it)
-            m_added[it.key()] << splitList(it.value());
+            level.added[it.key()] = splitList(it.value());
         const auto removed = groups.value(QStringLiteral("Removed Associations"));
         for (auto it = removed.begin(); it != removed.end(); ++it)
             for (const QString &id : splitList(it.value()))
-                m_removed[it.key()].insert(id);
+                level.removed[it.key()].insert(id);
+        m_levels << level;
     }
 }
 
@@ -174,16 +184,37 @@ QStringList DesktopApps::candidatesFor(const QString &mime) const {
         chain << type.aliases();
         chain << type.allAncestors();
     }
+    // Freedesktop mime-apps spec: the default is the first installed entry from
+    // the highest-precedence list; a removal only hides associations from its
+    // own level and lower ones.
     QStringList ids;
-    auto push = [&](const QString &m, const QStringList &list) {
-        for (const QString &id : list)
-            if (!m_removed.value(m).contains(id) && find(id) && !ids.contains(id))
-                ids << id;
+    auto push = [&](const QString &id) {
+        if (find(id) && !ids.contains(id))
+            ids << id;
     };
     for (const QString &m : chain) {
-        push(m, m_defaults.value(m));
-        push(m, m_added.value(m));
-        push(m, m_byMime.value(m));
+        bool haveDefault = false;
+        for (const Level &level : m_levels) {
+            for (const QString &id : level.defaults.value(m)) {
+                if (find(id)) {
+                    push(id);
+                    haveDefault = true;
+                    break;
+                }
+            }
+            if (haveDefault)
+                break;
+        }
+        QSet<QString> removed;
+        for (const Level &level : m_levels) {
+            for (const QString &id : level.added.value(m))
+                if (!removed.contains(id))
+                    push(id);
+            removed.unite(level.removed.value(m));
+        }
+        for (const QString &id : m_byMime.value(m))
+            if (!removed.contains(id))
+                push(id);
     }
     return ids;
 }
