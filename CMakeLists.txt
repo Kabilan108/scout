@@ -1,0 +1,56 @@
+cmake_minimum_required(VERSION 3.24)
+project(scout VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(SCOUT_PLUGIN_DIRS "" CACHE STRING "Extra Qt plugin directories baked into the binary (semicolon separated)")
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent Test)
+find_package(KF6SyntaxHighlighting REQUIRED)
+find_package(LibArchive REQUIRED)
+
+add_library(scoutcore STATIC
+  src/theme.cpp
+  src/fuzzy.cpp
+  src/keymap.cpp
+  src/dirmodel.cpp
+  src/columnview.cpp
+  src/preview.cpp
+  src/fileops.cpp
+  src/clipboard.cpp
+  src/desktopentry.cpp
+  src/finder.cpp
+  src/prompt.cpp
+  src/overlays.cpp
+  src/commands.cpp
+  src/mainwindow.cpp
+)
+target_include_directories(scoutcore PUBLIC src)
+target_link_libraries(scoutcore PUBLIC
+  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::DBus Qt6::Concurrent
+  KF6::SyntaxHighlighting
+  LibArchive::LibArchive
+)
+string(REPLACE ";" ":" SCOUT_PLUGIN_DIRS_JOINED "${SCOUT_PLUGIN_DIRS}")
+target_compile_definitions(scoutcore PUBLIC
+  SCOUT_VERSION="${PROJECT_VERSION}"
+  SCOUT_PLUGIN_DIRS="${SCOUT_PLUGIN_DIRS_JOINED}"
+)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(scoutcore PRIVATE -Wall -Wextra)
+endif()
+
+add_executable(scout src/main.cpp)
+target_link_libraries(scout PRIVATE scoutcore)
+
+install(TARGETS scout RUNTIME DESTINATION bin)
+install(FILES data/scout.desktop DESTINATION share/applications)
+install(FILES data/scout.svg DESTINATION share/icons/hicolor/scalable/apps)
+
+enable_testing()
+add_executable(scout_tests tests/test_scout.cpp)
+target_link_libraries(scout_tests PRIVATE scoutcore Qt6::Test)
+add_test(NAME scout_tests COMMAND scout_tests)

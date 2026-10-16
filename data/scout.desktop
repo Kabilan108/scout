@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=scout
+GenericName=File Manager
+Comment=Keyboard-first, ranger-style file manager
+Exec=scout %U
+Icon=scout
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;Qt;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;ranger;
+StartupWMClass=scout
