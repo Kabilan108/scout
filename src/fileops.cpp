@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QRandomGenerator>
 #include <QThreadPool>
 
 #include <cerrno>
@@ -117,19 +118,38 @@ int renameNoReplace(const QString &from, const QString &to) {
         return 0;
     if (errno != EINVAL && errno != ENOSYS && errno != EOPNOTSUPP)
         return errno;
-    // Filesystems without RENAME_NOREPLACE: link() refuses to replace, rename() does not.
+    return renameByReservation(from, to);
+}
+
+int renameByReservation(const QString &from, const QString &to) {
+    const QByteArray f = QFile::encodeName(from), t = QFile::encodeName(to);
+    // Filesystems without RENAME_NOREPLACE: atomically reserve the destination,
+    // then rename over our own reservation. rename() only replaces an empty
+    // directory, so a folder someone fills in the meantime makes it fail.
     struct stat st {};
     if (lstat(f.constData(), &st) != 0)
         return errno;
-    if (!S_ISDIR(st.st_mode)) {
+    if (S_ISDIR(st.st_mode)) {
+        if (mkdir(t.constData(), 0700) != 0)
+            return errno;
+    } else {
         if (link(f.constData(), t.constData()) == 0)
             return unlink(f.constData()) == 0 ? 0 : errno;
         if (errno == EEXIST)
             return EEXIST;
+        const int fd = open(t.constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0)
+            return errno;
+        close(fd);
     }
-    if (lstat(t.constData(), &st) == 0)
-        return EEXIST;
-    return ::rename(f.constData(), t.constData()) == 0 ? 0 : errno;
+    if (::rename(f.constData(), t.constData()) == 0)
+        return 0;
+    const int err = errno;
+    if (S_ISDIR(st.st_mode))
+        rmdir(t.constData());
+    else
+        unlink(t.constData());
+    return err;
 }
 
 QString moveToUnique(const QString &from, const QString &dir, const QString &name, int *errorNumber) {
@@ -230,6 +250,7 @@ public:
             close(in);
             return false;
         }
+        noteCreated(dst);
         bool ok = true;
         bool useCopyRange = true;
         constexpr size_t kChunk = 8 << 20;
@@ -311,6 +332,7 @@ public:
                 error(dst, errnoString());
                 return false;
             }
+            noteCreated(dst);
             return true;
         }
         if (S_ISDIR(st.st_mode)) {
@@ -318,6 +340,7 @@ public:
                 error(dst, errnoString());
                 return false;
             }
+            noteCreated(dst);
             QString err;
             const QStringList children = childNames(s, &err);
             if (!err.isEmpty())
@@ -325,9 +348,12 @@ public:
             bool ok = err.isEmpty();
             for (const QString &child : children)
                 ok = copyTree(joinPath(src, child), joinPath(dst, child)) && ok;
-            chmod(d.constData(), st.st_mode & 07777);
-            const struct timespec times[2] = {st.st_atim, st.st_mtim};
-            utimensat(AT_FDCWD, d.constData(), times, 0);
+            // A restrictive mode on a half-copied folder would block cleanup.
+            if (ok) {
+                chmod(d.constData(), st.st_mode & 07777);
+                const struct timespec times[2] = {st.st_atim, st.st_mtim};
+                utimensat(AT_FDCWD, d.constData(), times, 0);
+            }
             return ok;
         }
         if (S_ISREG(st.st_mode))
@@ -405,27 +431,39 @@ public:
     // so failed or cancelled copies leave nothing behind.
     QString copyIntoPlace(const QString &src, const QString &target) {
         const QString name = baseName(src);
-        const QString temp = uniqueDestination(target, QStringLiteral(".%1.scout-partial").arg(name));
+        const QString temp = uniqueDestination(
+            target, QStringLiteral(".%1.scout-partial-%2").arg(name).arg(QRandomGenerator::global()->generate(), 8, 16, QLatin1Char('0')));
         if (temp.isEmpty()) {
             error(src, QStringLiteral("no free name in %1").arg(target));
             return {};
         }
-        if (copyTree(src, temp)) {
+        m_claimTarget = temp;
+        m_claimed = false;
+        const bool copied = copyTree(src, temp);
+        m_claimTarget.clear();
+        if (copied) {
             int err = 0;
             const QString dest = moveToUnique(temp, target, name, &err);
             if (!dest.isEmpty())
                 return dest;
             error(src, QString::fromLocal8Bit(strerror(err)));
         }
-        struct stat st {};
-        if (lstat(QFile::encodeName(temp).constData(), &st) == 0)
-            removeTree(temp, false);
+        // Only remove the staging entry if this copy created it.
+        if (m_claimed && !removeTree(temp, false))
+            error(temp, QStringLiteral("partial copy left behind"));
         return {};
+    }
+
+    void noteCreated(const QString &path) {
+        if (path == m_claimTarget)
+            m_claimed = true;
     }
 
 private:
     std::function<void(const std::function<void(Task::Progress &)> &)> m_update;
     std::function<bool()> m_cancelled;
+    QString m_claimTarget;
+    bool m_claimed = false;
 };
 
 } // namespace

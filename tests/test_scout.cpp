@@ -398,12 +398,22 @@ private slots:
 
     void renamesNeverReplace() {
         const QString base = makeTree();
-        const QString a = base + QStringLiteral("/file2.txt"), b = base + QStringLiteral("/file10.txt");
+        const QString a = base + QStringLiteral("/file2.txt");
+        const QString b = base + QStringLiteral("/file10.txt");
         QCOMPARE(renameNoReplace(a, b), EEXIST);
         QVERIFY(QFile::exists(a));
         QVERIFY(QFile::link(base + QStringLiteral("/missing"), base + QStringLiteral("/dangling")));
         QCOMPARE(renameNoReplace(a, base + QStringLiteral("/dangling")), EEXIST);
         QCOMPARE(renameNoReplace(a, base + QStringLiteral("/fresh.txt")), 0);
+        QCOMPARE(renameByReservation(base + QStringLiteral("/fresh.txt"), b), EEXIST);
+        QCOMPARE(renameByReservation(base + QStringLiteral("/fresh.txt"), base + QStringLiteral("/dangling")), EEXIST);
+        QCOMPARE(renameByReservation(base + QStringLiteral("/alpha"), base + QStringLiteral("/beta")), EEXIST);
+        QVERIFY(QFileInfo(base + QStringLiteral("/alpha/one.md")).exists());
+        QCOMPARE(renameByReservation(base + QStringLiteral("/alpha"), base + QStringLiteral("/gamma")), 0);
+        QVERIFY(QFileInfo(base + QStringLiteral("/gamma/one.md")).exists());
+        QCOMPARE(renameByReservation(base + QStringLiteral("/fresh.txt"), base + QStringLiteral("/fresh2.txt")), 0);
+        QVERIFY(!QFileInfo::exists(base + QStringLiteral("/fresh.txt")));
+        QCOMPARE(renameByReservation(base + QStringLiteral("/gamma"), base + QStringLiteral("/alpha")), 0);
 
         // Moving onto an existing name keeps both files.
         writeFile(base + QStringLiteral("/beta/notes.md"), "original\n");
@@ -490,6 +500,23 @@ private slots:
         QVERIFY(!QFileInfo::exists(other.path() + QStringLiteral("/pkg")));
         QCOMPARE(QDir(base + QStringLiteral("/beta")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden),
                  QStringList{QStringLiteral("pkg")});
+    }
+
+    void unreadableFolderCopyCleansUp() {
+        if (geteuid() == 0)
+            QSKIP("root can read unreadable folders");
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/src/ok.txt"));
+        QDir().mkpath(base + QStringLiteral("/src/locked"));
+        QVERIFY(chmod(QFile::encodeName(base + QStringLiteral("/src/locked")).constData(), 0) == 0);
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Copy, {base + QStringLiteral("/src")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(finished.size(), 1);
+        chmod(QFile::encodeName(base + QStringLiteral("/src/locked")).constData(), 0700);
+        QCOMPARE(t->progress().state, Task::Failed);
+        QCOMPARE(QDir(base + QStringLiteral("/beta")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden),
+                 QStringList());
     }
 
     void dropCopiesIntoFolder() {

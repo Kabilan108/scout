@@ -5,7 +5,16 @@
 #include <QCommandLineParser>
 #include <QDir>
 
+#include <sys/resource.h>
+
 int main(int argc, char *argv[]) {
+    // Deleting deep trees holds one descriptor per level.
+    struct rlimit files {};
+    // Capped, because launched apps inherit it and select()-based code breaks above 1024 fds.
+    if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < 16384) {
+        files.rlim_cur = std::min<rlim_t>(files.rlim_max, 16384);
+        setrlimit(RLIMIT_NOFILE, &files);
+    }
     for (const QString &dir : QStringLiteral(SCOUT_PLUGIN_DIRS).split(u':', Qt::SkipEmptyParts))
         QCoreApplication::addLibraryPath(dir);
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))

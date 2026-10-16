@@ -84,6 +84,8 @@ private:
 QString uniqueDestination(const QString &dir, const QString &name);
 // rename() that fails with EEXIST instead of replacing; returns 0 or an errno.
 int renameNoReplace(const QString &from, const QString &to);
+// The fallback for filesystems without RENAME_NOREPLACE.
+int renameByReservation(const QString &from, const QString &to);
 // Renames `from` into `dir` under the first free variant of `name`.
 QString moveToUnique(const QString &from, const QString &dir, const QString &name, int *errorNumber);
 // True if `dir` is `folder` or below it, following symlinks in `dir`.
