@@ -16,6 +16,7 @@ struct FileEntry {
     bool isSymlink = false;
     bool isBrokenLink = false;
     bool isExecutable = false;
+    bool isRegular = false;  // of the link target, for symlinks
     qint64 size = 0;
     qint64 mtime = 0;        // seconds since epoch
     mode_t mode = 0;
@@ -39,6 +40,7 @@ QString permissionString(const FileEntry &e);
 int naturalCompare(QStringView a, QStringView b);
 FileEntry statEntry(const QString &path);
 QVector<FileEntry> listDirectory(const QString &path, QString *error);
+void sortEntries(QVector<FileEntry> &entries, const ViewOptions &options);
 
 // Paths marked for a bulk operation. Marks persist across directories.
 class Marks : public QObject {

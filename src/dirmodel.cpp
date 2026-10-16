@@ -38,6 +38,7 @@ QString readLinkAt(int dirfd, const char *name) {
 
 void fillFromStat(FileEntry &e, const struct stat &st) {
     e.isDir = S_ISDIR(st.st_mode);
+    e.isRegular = S_ISREG(st.st_mode);
     e.size = st.st_size;
     e.mtime = st.st_mtim.tv_sec;
     e.mode = st.st_mode;
@@ -72,6 +73,30 @@ QString extensionOf(const QString &name) {
 }
 
 } // namespace
+
+void sortEntries(QVector<FileEntry> &entries, const ViewOptions &opt) {
+    std::stable_sort(entries.begin(), entries.end(), [&opt](const FileEntry &a, const FileEntry &b) {
+        if (opt.dirsFirst && a.isDir != b.isDir)
+            return a.isDir;
+        int c = 0;
+        switch (opt.sort) {
+        case ViewOptions::Size:
+            c = a.size == b.size ? 0 : (a.size > b.size ? -1 : 1);
+            break;
+        case ViewOptions::Modified:
+            c = a.mtime == b.mtime ? 0 : (a.mtime > b.mtime ? -1 : 1);
+            break;
+        case ViewOptions::Extension:
+            c = naturalCompare(extensionOf(a.name), extensionOf(b.name));
+            break;
+        case ViewOptions::Name:
+            break;
+        }
+        if (c == 0)
+            c = naturalCompare(a.name, b.name);
+        return opt.reverse ? c > 0 : c < 0;
+    });
+}
 
 QString humanSize(qint64 bytes) {
     static const char *units[] = {"B", "K", "M", "G", "T", "P"};
@@ -279,11 +304,14 @@ void DirModel::reload() {
 void DirModel::startLoad() {
     const quint64 generation = ++m_generation;
     const QString path = m_path;
+    const ViewOptions options = m_options;
     m_loading = true;
     QPointer<DirModel> self(this);
-    QtConcurrent::run(listingPool(), [path] {
+    // Sorting runs here too: natural-order sorting /nix/store takes long enough to stall the UI.
+    QtConcurrent::run(listingPool(), [path, options] {
         QString error;
         QVector<FileEntry> entries = listDirectory(path, &error);
+        sortEntries(entries, options);
         return std::make_pair(std::move(entries), error);
     }).then(this, [self, generation](std::pair<QVector<FileEntry>, QString> result) {
         if (!self || generation != self->m_generation)
@@ -301,7 +329,13 @@ void DirModel::startLoad() {
 }
 
 void DirModel::setOptions(const ViewOptions &options) {
+    const bool resort = options.sort != m_options.sort || options.reverse != m_options.reverse ||
+                        options.dirsFirst != m_options.dirsFirst;
     m_options = options;
+    if (resort && !m_path.isEmpty()) {
+        startLoad();
+        return;
+    }
     if (!m_loaded)
         return;
     beginResetModel();
@@ -334,30 +368,6 @@ void DirModel::rebuildRows() {
             continue;
         m_rows.append(i);
     }
-    const ViewOptions opt = m_options;
-    std::stable_sort(m_rows.begin(), m_rows.end(), [this, opt](int ia, int ib) {
-        const FileEntry &a = m_all[ia];
-        const FileEntry &b = m_all[ib];
-        if (opt.dirsFirst && a.isDir != b.isDir)
-            return a.isDir;
-        int c = 0;
-        switch (opt.sort) {
-        case ViewOptions::Size:
-            c = a.size == b.size ? 0 : (a.size > b.size ? -1 : 1);
-            break;
-        case ViewOptions::Modified:
-            c = a.mtime == b.mtime ? 0 : (a.mtime > b.mtime ? -1 : 1);
-            break;
-        case ViewOptions::Extension:
-            c = naturalCompare(extensionOf(a.name), extensionOf(b.name));
-            break;
-        case ViewOptions::Name:
-            break;
-        }
-        if (c == 0)
-            c = naturalCompare(a.name, b.name);
-        return opt.reverse ? c > 0 : c < 0;
-    });
 }
 
 const FileEntry *DirModel::entry(int row) const {

@@ -350,6 +350,11 @@ void Preview::showEntry(const FileEntry &entry) {
         showInfo(entry, QStringLiteral("broken symbolic link"));
         return;
     }
+    // Reading a FIFO or device would block the UI thread.
+    if (!entry.isRegular) {
+        showInfo(entry, QStringLiteral("special file"));
+        return;
+    }
     QMimeDatabase db;
     const QMimeType mime = db.mimeTypeForFile(entry.path);
     if (entry.size == 0) {
