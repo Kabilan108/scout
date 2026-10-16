@@ -470,6 +470,28 @@ private slots:
         QCOMPARE(currentName(w), QStringLiteral("notes.md"));
     }
 
+    void crossDeviceMoveCopiesThenRemoves() {
+        struct stat shm {}, root {};
+        if (stat("/dev/shm", &shm) != 0 || stat(QFile::encodeName(m_root.path()).constData(), &root) != 0 ||
+            shm.st_dev == root.st_dev || access("/dev/shm", W_OK) != 0)
+            QSKIP("needs /dev/shm on a separate, writable filesystem");
+        QTemporaryDir other(QStringLiteral("/dev/shm/scout-test-XXXXXX"));
+        QVERIFY(other.isValid());
+        writeFile(other.path() + QStringLiteral("/pkg/a/one.txt"), "one\n");
+        writeFile(other.path() + QStringLiteral("/pkg/two.txt"), "two\n");
+        const QString base = makeTree();
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Move, {other.path() + QStringLiteral("/pkg")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(t->progress().state, Task::Done);
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/a/one.txt")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/two.txt")));
+        QVERIFY(!QFileInfo::exists(other.path() + QStringLiteral("/pkg")));
+        QCOMPARE(QDir(base + QStringLiteral("/beta")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden),
+                 QStringList{QStringLiteral("pkg")});
+    }
+
     void dropCopiesIntoFolder() {
         const QString base = makeTree();
         MainWindow w(base, false);
