@@ -194,6 +194,7 @@ QString Task::verb() const {
     case Link: return QStringLiteral("Linking");
     case Trash: return QStringLiteral("Trashing");
     case Delete: return QStringLiteral("Deleting");
+    case Restore: return QStringLiteral("Restoring");
     }
     return {};
 }
@@ -201,7 +202,7 @@ QString Task::verb() const {
 QString Task::title() const {
     const QString what = m_sources.size() == 1 ? baseName(m_sources.first())
                                                : QStringLiteral("%1 items").arg(m_sources.size());
-    if (m_kind == Trash || m_kind == Delete)
+    if (m_kind == Trash || m_kind == Delete || m_kind == Restore)
         return QStringLiteral("%1 %2").arg(verb(), what);
     return QStringLiteral("%1 %2 to %3").arg(verb(), what, baseName(m_targetDir));
 }
@@ -429,8 +430,9 @@ public:
 
     // Copies into a hidden sibling and renames it into place only on success,
     // so failed or cancelled copies leave nothing behind.
-    QString copyIntoPlace(const QString &src, const QString &target) {
-        const QString name = baseName(src);
+    // With `exactName`, the copy lands under exactly that name or fails.
+    QString copyIntoPlace(const QString &src, const QString &target, const QString &exactName = {}) {
+        const QString name = exactName.isEmpty() ? baseName(src) : exactName;
         const QString temp = uniqueDestination(
             target, QStringLiteral(".%1.scout-partial-%2").arg(name).arg(QRandomGenerator::global()->generate(), 8, 16, QLatin1Char('0')));
         if (temp.isEmpty()) {
@@ -443,10 +445,18 @@ public:
         m_claimTarget.clear();
         if (copied) {
             int err = 0;
-            const QString dest = moveToUnique(temp, target, name, &err);
+            QString dest;
+            if (exactName.isEmpty()) {
+                dest = moveToUnique(temp, target, name, &err);
+            } else {
+                err = renameNoReplace(temp, joinPath(target, name));
+                if (err == 0)
+                    dest = joinPath(target, name);
+            }
             if (!dest.isEmpty())
                 return dest;
-            error(src, QString::fromLocal8Bit(strerror(err)));
+            error(src, err == EEXIST ? QStringLiteral("%1 already exists").arg(name)
+                                     : QString::fromLocal8Bit(strerror(err)));
         }
         // Only remove the staging entry if this copy created it.
         if (m_claimed && !removeTree(temp, false))
@@ -482,7 +492,8 @@ void Task::run() {
 
     const QString target = m_targetDir.size() > 1 && m_targetDir.endsWith(u'/') ? m_targetDir.chopped(1)
                                                                                 : m_targetDir;
-    for (const QString &src : m_sources) {
+    for (qsizetype index = 0; index < m_sources.size(); ++index) {
+        const QString &src = m_sources[index];
         if (cancelled())
             break;
         update([&](Progress &p) { p.current = src; });
@@ -529,13 +540,55 @@ void Task::run() {
                 }
             }
             if (!dest.isEmpty())
-                update([&](Progress &p) { p.created << dest; });
+                update([&](Progress &p) {
+                    p.created << dest;
+                    if (m_kind == Move)
+                        p.moved.append({src, dest});
+                });
             break;
         }
-        case Trash:
-            if (!QFile::moveToTrash(src))
+        case Trash: {
+            QString inTrash;
+            if (QFile::moveToTrash(src, &inTrash))
+                update([&](Progress &p) { p.moved.append({src, inTrash}); });
+            else
                 worker.error(src, QStringLiteral("could not move to trash"));
             break;
+        }
+        case Restore: {
+            const QString to = m_destinations.value(index);
+            if (to.isEmpty()) {
+                worker.error(src, QStringLiteral("no destination"));
+                break;
+            }
+            const QString info = trashInfoPath(src);
+            QDir().mkpath(parentOf(to));
+            QString dest;
+            const int err = renameNoReplace(src, to);
+            if (err == 0) {
+                dest = to;
+            } else if (err == EXDEV) {
+                qint64 bytes = 0;
+                int items = 0;
+                measure(src, &bytes, &items);
+                update([&](Progress &p) { p.totalBytes += bytes; });
+                dest = worker.copyIntoPlace(src, parentOf(to), baseName(to));
+                if (!dest.isEmpty() && !worker.removeTree(src, false))
+                    worker.error(src, QStringLiteral("copied, but the original could not be fully removed"));
+            } else {
+                worker.error(src, err == EEXIST ? QStringLiteral("%1 already exists").arg(to)
+                                                : QString::fromLocal8Bit(strerror(err)));
+            }
+            if (!dest.isEmpty()) {
+                if (!info.isEmpty())
+                    unlink(QFile::encodeName(info).constData());
+                update([&](Progress &p) {
+                    p.created << dest;
+                    p.moved.append({src, dest});
+                });
+            }
+            break;
+        }
         case Delete:
             worker.removeTree(src);
             break;
@@ -575,7 +628,21 @@ TaskManager::~TaskManager() {
 }
 
 Task *TaskManager::start(Task::Kind kind, const QStringList &sources, const QString &targetDir) {
-    auto *task = new Task(kind, sources, targetDir, this);
+    return launch(new Task(kind, sources, targetDir, this));
+}
+
+Task *TaskManager::startRestore(const QList<QPair<QString, QString>> &moves) {
+    QStringList from, to;
+    for (const auto &[a, b] : moves) {
+        from << a;
+        to << b;
+    }
+    auto *task = new Task(Task::Restore, from, {}, this);
+    task->setDestinations(to);
+    return launch(task);
+}
+
+Task *TaskManager::launch(Task *task) {
     m_tasks << task;
     connect(task, &Task::finished, this, [this, task] {
         m_delivered.insert(task);
@@ -608,5 +675,99 @@ void TaskManager::clearFinished() {
 bool TaskManager::waitForAll(int timeoutMs) {
     const bool done = taskPool()->waitForDone(timeoutMs);
     QCoreApplication::processEvents();
+    return done;
+}
+
+QString trashInfoPath(const QString &trashedPath) {
+    const QString files = parentOf(trashedPath);
+    if (baseName(files) != QLatin1String("files"))
+        return {};
+    const QString info = joinPath(joinPath(parentOf(files), QStringLiteral("info")), baseName(trashedPath) + QStringLiteral(".trashinfo"));
+    return QFileInfo::exists(info) ? info : QString();
+}
+
+QString trashOriginalPath(const QString &trashedPath) {
+    const QString info = trashInfoPath(trashedPath);
+    if (info.isEmpty())
+        return {};
+    QFile f(info);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    bool inSection = false;
+    for (const QByteArray &raw : f.readAll().split('\n')) {
+        const QByteArray line = raw.trimmed();
+        if (line.startsWith('['))
+            inSection = line == "[Trash Info]";
+        else if (inSection && line.startsWith("Path=")) {
+            const QString path = QFile::decodeName(QByteArray::fromPercentEncoding(line.mid(5)));
+            if (path.isEmpty())
+                return {};
+            if (path.startsWith(u'/'))
+                return QDir::cleanPath(path);
+            // Trash directories on other mounts store paths relative to the mount's top.
+            const QString trashDir = parentOf(parentOf(trashedPath));
+            QString top = parentOf(trashDir);
+            if (baseName(trashDir).startsWith(QLatin1String(".Trash-")))
+                return QDir::cleanPath(joinPath(top, path));
+            if (baseName(top) == QLatin1String(".Trash"))
+                return QDir::cleanPath(joinPath(parentOf(top), path));
+            return {};
+        }
+    }
+    return {};
+}
+
+QList<QPair<QString, QString>> renameAll(const QList<QPair<QString, QString>> &renames, QStringList *errors) {
+    QList<QPair<QString, QString>> done;
+    QSet<QString> sources, targets;
+    for (const auto &[from, to] : renames)
+        sources.insert(from);
+    for (const auto &[from, to] : renames) {
+        struct stat st {};
+        if (lstat(QFile::encodeName(from).constData(), &st) != 0) {
+            errors->append(QStringLiteral("%1: %2").arg(baseName(from), errnoString()));
+            return done;
+        }
+        if (targets.contains(to)) {
+            errors->append(QStringLiteral("two entries would be named %1").arg(baseName(to)));
+            return done;
+        }
+        targets.insert(to);
+        if (!sources.contains(to) && lstat(QFile::encodeName(to).constData(), &st) == 0) {
+            errors->append(QStringLiteral("%1 already exists").arg(baseName(to)));
+            return done;
+        }
+    }
+
+    // Stage everything under temporary names first, so a -> b, b -> a works.
+    struct Staged {
+        QString from, temp, to;
+    };
+    QList<Staged> staged;
+    for (const auto &[from, to] : renames) {
+        if (from == to)
+            continue;
+        const QString temp = uniqueDestination(
+            parentOf(from), QStringLiteral(".%1.scout-rename-%2").arg(baseName(from)).arg(QRandomGenerator::global()->generate(), 8, 16, QLatin1Char('0')));
+        const int err = temp.isEmpty() ? EEXIST : renameNoReplace(from, temp);
+        if (err != 0) {
+            errors->append(QStringLiteral("%1: %2").arg(baseName(from), QString::fromLocal8Bit(strerror(err))));
+            for (auto it = staged.rbegin(); it != staged.rend(); ++it)
+                if (renameNoReplace(it->temp, it->from) != 0)
+                    errors->append(QStringLiteral("%1 was left as %2").arg(baseName(it->from), baseName(it->temp)));
+            return done;
+        }
+        staged.append({from, temp, to});
+    }
+    for (const Staged &s : staged) {
+        const int err = renameNoReplace(s.temp, s.to);
+        if (err == 0) {
+            done.append({s.from, s.to});
+            continue;
+        }
+        errors->append(QStringLiteral("%1 → %2: %3").arg(baseName(s.from), baseName(s.to), QString::fromLocal8Bit(strerror(err))));
+        if (renameNoReplace(s.temp, s.from) != 0)
+            errors->append(QStringLiteral("%1 was left as %2").arg(baseName(s.from), baseName(s.temp)));
+    }
     return done;
 }

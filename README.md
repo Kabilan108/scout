@@ -38,7 +38,12 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `Enter` | open with the default app |
 | `gg` `G` `5j` `Ctrl-d` `Ctrl-u` | top, bottom, counts, half pages |
 | `H` `L` | back and forward in history |
-| `gh` `gd` `gD` `gp` `gc` `gr` `g/` `gt` | home, Downloads, Documents, Pictures, ~/.config, ~/repos, /, trash |
+| `gh` `gd` `gD` `gp` `gv` `gM` | home, Downloads, Documents, Pictures, Videos, Music |
+| `gc` `gr` `g/` `gb` `gm` | ~/.config, ~/repos, /, the trash (bin), mounted drives |
+| `gn` / `Ctrl-t` | new tab here |
+| `gt` `gT` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
+| `q` / `Ctrl-w` | close the tab (the window, if it's the last); `Ctrl-q` closes the window |
+| `uq` | reopen the last closed tab |
 | `gf` / `Ctrl-p` | fuzzy find below the current folder |
 | `/` `n` `N` | jump to a matching name |
 | `f` / `zf` | filter the folder as you type (`Esc` clears) |
@@ -48,7 +53,10 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `yp` `yn` `yd` | copy path, name, or folder path as text |
 | `dD` / `Delete` | move to trash |
 | `dX` / `Shift-Delete` | delete permanently (asks `y/N`) |
-| `r` / `cw` / `F2` | rename (the name without its extension is preselected) |
+| `r` / `cw` / `F2` | rename (the name without its extension is preselected); with several marked, bulk rename |
+| `R` | bulk rename the marked items, or the whole folder, in `$EDITOR` |
+| `uu` / `Ctrl-z` | undo the last trash, move, rename, or copy |
+| `ur` | restore the trashed item under the cursor to where it came from |
 | `a` / `A` | create a file, or a folder if the name ends in `/` |
 | `o` | open with… (recommended apps first, then everything else) |
 | `zh` / `Ctrl-h` | toggle hidden files |
@@ -61,10 +69,29 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `Alt-Enter` | properties, including total folder size |
 | `Ctrl-n` | new window here |
 | `Ctrl-=` `Ctrl--` | zoom |
-| `q` | quit |
 
-Marks persist across folders, so you can collect files from several places
-and then copy, trash, or drag them together.
+Marks persist across folders and tabs, so you can collect files from several
+places and then copy, trash, or drag them together.
+
+## Undo, trash, and bulk rename
+
+Undo (`uu`) walks back through trashing, moves, renames, bulk renames, and
+copies (an undone copy goes to the trash). It never replaces a file: if
+something new now sits where an item would return to, that item stays put and
+scout tells you.
+
+In the trash (`gb`), `ur` restores the item under the cursor, or everything
+marked, to its original location. `:empty-trash` asks before deleting
+everything in it.
+
+`R` writes the names to a temporary file and opens it in your editor
+(`set editor`, then `$VISUAL`, then `$EDITOR`, then nvim/vim/vi). Terminal
+editors open in your terminal (`$TERMINAL`, or the first of ghostty, kitty,
+foot, alacritty, wezterm, konsole, gnome-terminal, xterm). Change the lines,
+save, quit, and scout shows the renames and asks before applying them.
+Swaps such as `a → b, b → a` work. If any new name is taken by a file outside
+the rename, or appears twice, nothing is renamed. For GUI editors that need a
+flag to wait, put it in the setting: `set editor code --wait`.
 
 ## Drag and drop
 
@@ -102,23 +129,62 @@ set hidden true
 set font JetBrains Mono
 set font-size 11
 set sort modified
+set editor nvim
 map gw cd ~/work
 map gn cd ~/notes
 map <C-t> terminal
 unmap q
 ```
 
-## Making it the default folder handler
+## Desktop integration
 
-With scout installed into your profile (for example by adding the flake's
-package to `home.packages`), run:
+`scout --service` is a D-Bus service that owns two names. D-Bus starts it on
+demand, and it exits after ten idle minutes with no windows.
 
-```sh
-xdg-mime default scout.desktop inode/directory
+- `org.freedesktop.FileManager1`: "Show in folder" in browsers, download
+  managers, and other apps opens a scout window with the file selected.
+- `org.freedesktop.impl.portal.desktop.scout`: a FileChooser backend for
+  xdg-desktop-portal, so open and save dialogs become scout windows.
+
+In a chooser window everything works as usual, plus:
+
+| Dialog | Keys |
+| --- | --- |
+| Open | `Enter`/`l` on a file chooses it. With several allowed, mark with `Space` and press `Ctrl-Enter`. |
+| Select folder | `l` goes into a folder, `Ctrl-Enter` selects the folder you're in. |
+| Save | The name field has focus. `Enter` saves into the folder you're in (asking before replacing). `Tab` moves between the name and the folders. |
+| Any | `Esc` (with nothing left to clear) or `q` cancels; `Alt-f` cycles the file type filter. |
+
+On NixOS:
+
+```nix
+xdg.portal = {
+  enable = true;
+  extraPortals = [ scout ];
+  # This replaces niri's own niri-portals.conf, so restate its default.
+  config.niri = {
+    default = [ "gnome" "gtk" ];
+    "org.freedesktop.impl.portal.FileChooser" = [ "scout" "gnome" "gtk" ];
+  };
+};
+home.packages = [ scout ];
+xdg.mimeApps.defaultApplications."inode/directory" = "scout.desktop";
 ```
+
+Apps decide whether to use the portal. Chromium, Electron apps, and
+Flatpaks do by default. GTK 3 apps need `GTK_USE_PORTAL=1`, GTK 4 apps
+`GDK_DEBUG=portals`, Firefox `widget.use-xdg-desktop-portal.file-picker = 1`,
+and Qt apps `QT_QPA_PLATFORMTHEME=xdgdesktopportal`.
+
+If Nautilus is installed, it also ships an `org.freedesktop.FileManager1`
+service file. To make sure scout wins, add a copy of scout's to
+`~/.local/share/dbus-1/services/`, which D-Bus searches first.
+
+Without NixOS, make scout the default folder handler with
+`xdg-mime default scout.desktop inode/directory`.
 
 ## Not done yet
 
-- Acting as the desktop's file chooser (an xdg-desktop-portal backend)
-- `org.freedesktop.FileManager1`, so "Show in folder" from browsers opens scout
-- Tabs, bulk rename in `$EDITOR`, undo for trash
+- Chooser windows open as ordinary windows rather than attached to the app
+  that asked (xdg-foreign); niri places them like any new window.
+- Mounting and ejecting drives; `gm` only browses what is already mounted.

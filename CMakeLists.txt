@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(scout VERSION 0.1.0 LANGUAGES CXX)
+project(scout VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,7 +26,9 @@ add_library(scoutcore STATIC
   src/prompt.cpp
   src/overlays.cpp
   src/commands.cpp
+  src/chooser.cpp
   src/mainwindow.cpp
+  src/service.cpp
 )
 target_include_directories(scoutcore PUBLIC src)
 target_link_libraries(scoutcore PUBLIC
@@ -46,9 +48,15 @@ endif()
 add_executable(scout src/main.cpp)
 target_link_libraries(scout PRIVATE scoutcore)
 
-install(TARGETS scout RUNTIME DESTINATION bin)
+include(GNUInstallDirs)
+install(TARGETS scout RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+foreach(service org.freedesktop.FileManager1 org.freedesktop.impl.portal.desktop.scout)
+  configure_file(data/${service}.service.in ${CMAKE_CURRENT_BINARY_DIR}/${service}.service @ONLY)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${service}.service DESTINATION ${CMAKE_INSTALL_DATADIR}/dbus-1/services)
+endforeach()
+install(FILES data/scout.portal DESTINATION ${CMAKE_INSTALL_DATADIR}/xdg-desktop-portal/portals)
 install(FILES data/scout.desktop DESTINATION share/applications)
-install(FILES data/scout.svg DESTINATION share/icons/hicolor/scalable/apps)
+install(DIRECTORY data/icons/hicolor DESTINATION ${CMAKE_INSTALL_DATADIR}/icons)
 
 enable_testing()
 add_executable(scout_tests tests/test_scout.cpp)

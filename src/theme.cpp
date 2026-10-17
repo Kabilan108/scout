@@ -2,8 +2,8 @@
 
 #include <QApplication>
 #include <QDBusConnection>
-#include <QDBusInterface>
-#include <QDBusReply>
+#include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -123,21 +123,26 @@ void Theme::init() {
 
     auto bus = QDBusConnection::sessionBus();
     if (bus.isConnected()) {
-        QDBusInterface settings(QLatin1String(kPortalService), QLatin1String(kPortalPath),
-                                QLatin1String(kPortalSettings), bus);
-        settings.setTimeout(500);
-        QDBusReply<QDBusVariant> reply = settings.call(QStringLiteral("ReadOne"),
-                                                       QStringLiteral("org.freedesktop.appearance"),
-                                                       QStringLiteral("color-scheme"));
-        if (reply.isValid()) {
-            m_portalScheme = unwrapScheme(reply.value().variant());
-        } else {
-            QDBusReply<QDBusVariant> legacy = settings.call(QStringLiteral("Read"),
-                                                            QStringLiteral("org.freedesktop.appearance"),
-                                                            QStringLiteral("color-scheme"));
-            if (legacy.isValid())
-                m_portalScheme = unwrapScheme(legacy.value().variant());
-        }
+        // Asynchronous on purpose: as a portal backend, scout starts while
+        // xdg-desktop-portal is blocked waiting for it, so a blocking call
+        // (or QDBusInterface's introspection) would deadlock until timeout.
+        auto read = [this, bus](const QString &method, auto &&self) -> void {
+            QDBusMessage call = QDBusMessage::createMethodCall(QLatin1String(kPortalService), QLatin1String(kPortalPath),
+                                                               QLatin1String(kPortalSettings), method);
+            call << QStringLiteral("org.freedesktop.appearance") << QStringLiteral("color-scheme");
+            auto *watcher = new QDBusPendingCallWatcher(bus.asyncCall(call, 2000), this);
+            connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, method, self](QDBusPendingCallWatcher *w) {
+                w->deleteLater();
+                const QDBusPendingReply<QDBusVariant> reply = *w;
+                if (reply.isValid()) {
+                    m_portalScheme = unwrapScheme(reply.value().variant());
+                    rebuild();
+                } else if (method == QLatin1String("ReadOne")) {
+                    self(QStringLiteral("Read"), self);
+                }
+            });
+        };
+        read(QStringLiteral("ReadOne"), read);
         bus.connect(QLatin1String(kPortalService), QLatin1String(kPortalPath), QLatin1String(kPortalSettings),
                     QStringLiteral("SettingChanged"), this,
                     SLOT(onPortalSettingChanged(QString, QString, QDBusVariant)));

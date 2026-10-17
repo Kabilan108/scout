@@ -3,6 +3,7 @@
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <QPair>
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
@@ -13,7 +14,8 @@
 class Task : public QObject {
     Q_OBJECT
 public:
-    enum Kind { Copy, Move, Link, Trash, Delete };
+    // Restore moves each source to an exact destination path; undo uses it.
+    enum Kind { Copy, Move, Link, Trash, Delete, Restore };
     enum State { Running, Done, Failed, Cancelled };
 
     struct Progress {
@@ -24,10 +26,13 @@ public:
         int doneItems = 0;
         QString current;
         QStringList errors;
-        QStringList created; // destination paths of copied/moved/linked items
+        QStringList created; // destination paths of copied/moved/linked/restored items
+        QList<QPair<QString, QString>> moved; // (from, to) for moves, trashing and restores
     };
 
     Task(Kind kind, QStringList sources, QString targetDir, QObject *parent = nullptr);
+    // For Restore: one destination per source.
+    void setDestinations(QStringList destinations) { m_destinations = std::move(destinations); }
 
     Kind kind() const { return m_kind; }
     QStringList sources() const { return m_sources; }
@@ -52,6 +57,7 @@ private:
     Kind m_kind;
     QStringList m_sources;
     QString m_targetDir;
+    QStringList m_destinations;
     mutable QMutex m_mutex;
     Progress m_progress;
     std::atomic_bool m_cancel{false};
@@ -64,6 +70,8 @@ public:
     ~TaskManager() override;
 
     Task *start(Task::Kind kind, const QStringList &sources, const QString &targetDir = {});
+    // Moves each pair's first path to exactly its second path, never replacing anything.
+    Task *startRestore(const QList<QPair<QString, QString>> &moves);
     QList<Task *> tasks() const { return m_tasks; }
     int activeCount() const;
     void clearFinished();
@@ -75,6 +83,8 @@ signals:
     void taskFinished(Task *task);
 
 private:
+    Task *launch(Task *task);
+
     QList<Task *> m_tasks;
     QSet<Task *> m_delivered;
     QTimer m_poll;
@@ -90,3 +100,11 @@ int renameByReservation(const QString &from, const QString &to);
 QString moveToUnique(const QString &from, const QString &dir, const QString &name, int *errorNumber);
 // True if `dir` is `folder` or below it, following symlinks in `dir`.
 bool isSameOrInside(const QString &dir, const QString &folder);
+// Where a file in a freedesktop trash ("<trash>/files/<name>") came from; empty if unknown.
+QString trashOriginalPath(const QString &trashedPath);
+// The .trashinfo file that belongs to a trashed path; empty if it isn't one.
+QString trashInfoPath(const QString &trashedPath);
+// Renames every (from, to) pair, staging through temporary names so swaps and
+// cycles work. Never replaces a path that isn't itself being renamed away.
+// Returns the pairs that were applied; problems go to `errors`.
+QList<QPair<QString, QString>> renameAll(const QList<QPair<QString, QString>> &renames, QStringList *errors);

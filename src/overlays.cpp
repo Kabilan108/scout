@@ -41,28 +41,70 @@ void HeaderBar::setPath(const QString &dir, const QString &name) {
     update();
 }
 
+void HeaderBar::setTabs(const QStringList &labels, int active) {
+    m_tabs = labels;
+    m_activeTab = active;
+    update();
+}
+
 QSize HeaderBar::sizeHint() const { return QSize(200, Theme::instance().rowHeight() + 6); }
+
+void HeaderBar::mousePressEvent(QMouseEvent *event) {
+    for (int i = 0; i < m_tabRects.size(); ++i)
+        if (m_tabRects[i].contains(event->position().toPoint()))
+            emit tabClicked(i);
+}
 
 void HeaderBar::paintEvent(QPaintEvent *) {
     QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
     const Palette &pal = Theme::p();
     p.fillRect(rect(), pal.crust);
     QFont font = Theme::instance().font();
     font.setBold(true);
     p.setFont(font);
     const QFontMetrics fm(font);
+
+    // Tabs are laid out right to left so the path gets whatever is left.
+    m_tabRects.clear();
+    int tabsLeft = width() - 6;
+    if (m_tabs.size() > 1) {
+        QFont tabFont = Theme::instance().font();
+        const QFontMetrics tfm(tabFont);
+        QList<QRect> rects;
+        for (int i = int(m_tabs.size()) - 1; i >= 0; --i) {
+            const QString label = QStringLiteral("%1 %2").arg(i + 1).arg(tfm.elidedText(m_tabs[i], Qt::ElideMiddle, 140));
+            const int w = tfm.horizontalAdvance(label) + 16;
+            tabsLeft -= w + 4;
+            rects.prepend(QRect(tabsLeft, 3, w, height() - 6));
+        }
+        p.setFont(tabFont);
+        for (int i = 0; i < rects.size(); ++i) {
+            const bool active = i == m_activeTab;
+            p.setPen(Qt::NoPen);
+            p.setBrush(active ? pal.accent : pal.surface);
+            p.drawRoundedRect(rects[i], 4, 4);
+            p.setPen(active ? pal.crust : pal.subtext);
+            const QString label = QStringLiteral("%1 %2").arg(i + 1).arg(tfm.elidedText(m_tabs[i], Qt::ElideMiddle, 140));
+            p.drawText(rects[i], Qt::AlignCenter, label);
+        }
+        m_tabRects = rects;
+        p.setFont(font);
+        tabsLeft -= 8;
+    }
+
     QString dir = tildePath(m_dir);
     if (!dir.endsWith(u'/'))
         dir += u'/';
     const int nameWidth = fm.horizontalAdvance(m_name);
-    const int available = width() - 20;
+    const int available = std::max(60, tabsLeft - 10);
     const QString shownDir = fm.elidedText(dir, Qt::ElideLeft, std::max(40, available - nameWidth));
     p.setPen(pal.accent);
     p.drawText(QRect(10, 0, available, height()), Qt::AlignVCenter | Qt::AlignLeft, shownDir);
     p.setPen(pal.text);
     const int x = 10 + fm.horizontalAdvance(shownDir);
-    p.drawText(QRect(x, 0, width() - x - 10, height()), Qt::AlignVCenter | Qt::AlignLeft,
-               fm.elidedText(m_name, Qt::ElideMiddle, width() - x - 10));
+    p.drawText(QRect(x, 0, available + 10 - x, height()), Qt::AlignVCenter | Qt::AlignLeft,
+               fm.elidedText(m_name, Qt::ElideMiddle, std::max(0, available + 10 - x)));
 }
 
 StatusBar::StatusBar(QWidget *parent) : QWidget(parent) {

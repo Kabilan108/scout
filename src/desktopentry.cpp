@@ -331,7 +331,7 @@ QList<QStringList> DesktopApps::commandLines(const DesktopApp &app, const QStrin
         if (app.terminal) {
             const QString term = terminalProgram();
             if (!term.isEmpty())
-                argv = QStringList{term, QStringLiteral("-e")} + argv;
+                argv = QStringList{term} + terminalExecArgs(term) + argv;
         }
         return argv;
     };
@@ -385,4 +385,15 @@ QStringList terminalArgsForDirectory(const QString &terminal, const QString &dir
     if (name == QLatin1String("gnome-terminal"))
         return {QStringLiteral("--working-directory=") + dir};
     return {};
+}
+
+QStringList terminalExecArgs(const QString &terminal) {
+    const QString name = QFileInfo(terminal).fileName();
+    if (name == QLatin1String("kitty"))
+        return {};
+    if (name == QLatin1String("wezterm"))
+        return {QStringLiteral("start"), QStringLiteral("--")};
+    if (name == QLatin1String("gnome-terminal"))
+        return {QStringLiteral("--")};
+    return {QStringLiteral("-e")};
 }

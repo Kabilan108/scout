@@ -356,6 +356,16 @@ void DirModel::setFilter(const QString &filter) {
     emit refreshed();
 }
 
+void DirModel::setFileFilter(std::function<bool(const FileEntry &)> accept) {
+    m_fileFilter = std::move(accept);
+    if (!m_loaded)
+        return;
+    beginResetModel();
+    rebuildRows();
+    endResetModel();
+    emit refreshed();
+}
+
 void DirModel::rebuildRows() {
     m_rows.clear();
     m_rows.reserve(m_all.size());
@@ -365,6 +375,8 @@ void DirModel::rebuildRows() {
         if (!m_options.showHidden && e.isHidden())
             continue;
         if (!m_filter.isEmpty() && !e.name.contains(m_filter, caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive))
+            continue;
+        if (m_fileFilter && !e.isDir && !m_fileFilter(e))
             continue;
         m_rows.append(i);
     }

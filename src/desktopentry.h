@@ -51,3 +51,5 @@ private:
 
 QString terminalProgram();
 QStringList terminalArgsForDirectory(const QString &terminal, const QString &dir);
+// Arguments that come before the command line a terminal should run.
+QStringList terminalExecArgs(const QString &terminal);

@@ -6,14 +6,17 @@
 #include "fuzzy.h"
 #include "keymap.h"
 #include "mainwindow.h"
+#include "service.h"
 #include "theme.h"
 
+#include <QDBusArgument>
 #include <QDir>
 #include <QFile>
 #include <QMimeData>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUrl>
 
 #include <cerrno>
 #include <sys/stat.h>
@@ -132,6 +135,14 @@ private slots:
         QCOMPARE(KeyMap::tokenFor(&space), QStringLiteral("<Space>"));
         QKeyEvent colon(QEvent::KeyPress, Qt::Key_Colon, Qt::ShiftModifier, QStringLiteral(":"));
         QCOMPARE(KeyMap::tokenFor(&colon), QStringLiteral(":"));
+        QKeyEvent ctrlTab(QEvent::KeyPress, Qt::Key_Tab, Qt::ControlModifier);
+        QCOMPARE(KeyMap::tokenFor(&ctrlTab), QStringLiteral("<C-Tab>"));
+        QKeyEvent ctrlShiftTab(QEvent::KeyPress, Qt::Key_Backtab, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(KeyMap::tokenFor(&ctrlShiftTab), QStringLiteral("<C-S-Tab>"));
+        QKeyEvent shiftTab(QEvent::KeyPress, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(KeyMap::tokenFor(&shiftTab), QStringLiteral("<S-Tab>"));
+        QKeyEvent alt3(QEvent::KeyPress, Qt::Key_3, Qt::AltModifier, QStringLiteral("3"));
+        QCOMPARE(KeyMap::tokenFor(&alt3), QStringLiteral("<A-3>"));
     }
 
     void naturalSortAndSizes() {
@@ -529,6 +540,370 @@ private slots:
                                             Qt::CopyAction);
         QTRY_VERIFY(QFile::exists(base + QStringLiteral("/beta/notes.md")));
         QVERIFY(QFile::exists(base + QStringLiteral("/notes.md")));
+    }
+    void tabsKeepTheirOwnPlace() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("G"));
+        QCOMPARE(currentName(w), QStringLiteral("notes.md"));
+
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.tabCount(), 2);
+        QCOMPARE(w.currentTab(), 1);
+        QCOMPARE(w.cwd(), base + QStringLiteral("/alpha"));
+
+        keys(w, QStringLiteral("gt"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), base);
+        QTRY_COMPARE(currentName(w), QStringLiteral("notes.md"));
+
+        // A second tab in the same folder still restores its own cursor.
+        w.runCommandLine(QStringLiteral("new-tab"));
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("gg"));
+        QCOMPARE(w.tabCount(), 3);
+        w.runCommandLine(QStringLiteral("tab 1"));
+        QTRY_VERIFY(w.isIdle());
+        QTRY_COMPARE(currentName(w), QStringLiteral("notes.md"));
+
+        keys(w, QStringLiteral("q"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.tabCount(), 2);
+        QVERIFY(w.isVisible());
+        keys(w, QStringLiteral("uq"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.tabCount(), 3);
+        QCOMPARE(w.cwd(), base);
+    }
+
+    void undoTrashMoveRenameAndCopy() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+
+        w.cd(base + QStringLiteral("/notes.md"));
+        QTRY_COMPARE(currentName(w), QStringLiteral("notes.md"));
+        keys(w, QStringLiteral("dD"));
+        QTRY_VERIFY(!QFile::exists(base + QStringLiteral("/notes.md")));
+        QTRY_COMPARE(w.undoDepth(), 1);
+        const QString trashFiles = QString::fromLocal8Bit(qgetenv("XDG_DATA_HOME")) + QStringLiteral("/Trash/files");
+        const QString trashInfo = QString::fromLocal8Bit(qgetenv("XDG_DATA_HOME")) + QStringLiteral("/Trash/info");
+        const int infosBefore = int(QDir(trashInfo).entryList(QDir::Files).size());
+        keys(w, QStringLiteral("uu"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/notes.md")));
+        QTRY_COMPARE(int(QDir(trashInfo).entryList(QDir::Files).size()), infosBefore - 1);
+        QCOMPARE(w.undoDepth(), 0);
+
+        // Move, then undo puts it back.
+        w.tasks()->start(Task::Move, {base + QStringLiteral("/file2.txt")}, base + QStringLiteral("/beta"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/beta/file2.txt")));
+        QTRY_COMPARE(w.undoDepth(), 1);
+        w.runCommandLine(QStringLiteral("undo"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/file2.txt")));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/beta/file2.txt")));
+
+        // Rename, then undo.
+        QTRY_VERIFY(w.isIdle());
+        w.cd(base + QStringLiteral("/file10.txt"));
+        QTRY_COMPARE(currentName(w), QStringLiteral("file10.txt"));
+        w.runCommandLine(QStringLiteral("rename ten.txt"));
+        QVERIFY(QFile::exists(base + QStringLiteral("/ten.txt")));
+        keys(w, QStringLiteral("uu"));
+        QVERIFY(QFile::exists(base + QStringLiteral("/file10.txt")));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/ten.txt")));
+
+        // Undoing a copy moves the copy to the trash.
+        w.tasks()->start(Task::Copy, {base + QStringLiteral("/file10.txt")}, base + QStringLiteral("/beta"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/beta/file10.txt")));
+        QTRY_COMPARE(w.undoDepth(), 1);
+        w.runCommandLine(QStringLiteral("undo"));
+        QTRY_VERIFY(!QFile::exists(base + QStringLiteral("/beta/file10.txt")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/file10.txt")));
+        QVERIFY(QFile::exists(trashFiles));
+    }
+
+    void undoDoesNotReplaceANewFile() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.tasks()->start(Task::Move, {base + QStringLiteral("/file2.txt")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(w.undoDepth(), 1);
+        writeFile(base + QStringLiteral("/file2.txt"), "newer\n");
+        QSignalSpy finished(w.tasks(), &TaskManager::taskFinished);
+        w.runCommandLine(QStringLiteral("undo"));
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(finished.first().first().value<Task *>()->progress().state, Task::Failed);
+        QFile f(base + QStringLiteral("/file2.txt"));
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), QByteArray("newer\n"));
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/file2.txt")));
+    }
+
+    void restoreFromTrashFolder() {
+        const QString base = makeTree();
+        QString inTrash;
+        QVERIFY(QFile::moveToTrash(base + QStringLiteral("/file2.txt"), &inTrash));
+        QCOMPARE(trashOriginalPath(inTrash), base + QStringLiteral("/file2.txt"));
+        MainWindow w(inTrash, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(currentName(w), QFileInfo(inTrash).fileName());
+        keys(w, QStringLiteral("ur"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/file2.txt")));
+        QVERIFY(!QFile::exists(inTrash));
+        QVERIFY(trashInfoPath(inTrash).isEmpty());
+        // Undoing the restore trashes it again.
+        QTRY_COMPARE(w.undoDepth(), 1);
+        w.runCommandLine(QStringLiteral("undo"));
+        QTRY_VERIFY(!QFile::exists(base + QStringLiteral("/file2.txt")));
+    }
+
+    void renameAllHandlesSwapsAndRefusesCollisions() {
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/a"), "A");
+        writeFile(base + QStringLiteral("/b"), "B");
+        QStringList errors;
+        auto done = renameAll({{base + QStringLiteral("/a"), base + QStringLiteral("/b")},
+                               {base + QStringLiteral("/b"), base + QStringLiteral("/a")}},
+                              &errors);
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(u';')));
+        QCOMPARE(done.size(), 2);
+        QFile a(base + QStringLiteral("/a"));
+        QVERIFY(a.open(QIODevice::ReadOnly));
+        QCOMPARE(a.readAll(), QByteArray("B"));
+
+        // A target that exists and isn't being renamed away stops everything.
+        errors.clear();
+        done = renameAll({{base + QStringLiteral("/a"), base + QStringLiteral("/c")},
+                          {base + QStringLiteral("/b"), base + QStringLiteral("/notes.md")}},
+                         &errors);
+        QVERIFY(done.isEmpty());
+        QCOMPARE(errors.size(), 1);
+        QVERIFY(QFile::exists(base + QStringLiteral("/a")));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/c")));
+
+        errors.clear();
+        done = renameAll({{base + QStringLiteral("/a"), base + QStringLiteral("/same")},
+                          {base + QStringLiteral("/b"), base + QStringLiteral("/same")}},
+                         &errors);
+        QVERIFY(done.isEmpty());
+        QVERIFY(!errors.isEmpty());
+        // Nothing is left behind under a staging name.
+        for (const QString &name : QDir(base).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot))
+            QVERIFY2(!name.contains(QStringLiteral("scout-rename")), qPrintable(name));
+    }
+
+    void bulkRenameThroughEditor() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.bulkRenameWith([](const QStringList &lines) {
+            QStringList out = lines;
+            for (QString &l : out)
+                if (l == QLatin1String("file2.txt"))
+                    l = QStringLiteral("file10.txt");
+                else if (l == QLatin1String("file10.txt"))
+                    l = QStringLiteral("file2.txt");
+                else if (l == QLatin1String("notes.md"))
+                    l = QStringLiteral("NOTES.md");
+            return out;
+        });
+        QVERIFY(w.prompt()->isOpen());
+        QCOMPARE(w.picker()->items().size(), 3);
+        keys(w, QStringLiteral("y"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/NOTES.md")));
+        QFile ten(base + QStringLiteral("/file10.txt"));
+        QVERIFY(ten.open(QIODevice::ReadOnly));
+        QCOMPARE(ten.size(), QFileInfo(base + QStringLiteral("/file2.txt")).size());
+        QCOMPARE(w.undoDepth(), 1);
+        w.runCommandLine(QStringLiteral("undo"));
+        QVERIFY(QFile::exists(base + QStringLiteral("/notes.md")));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/NOTES.md")));
+
+        // Wrong line counts and slashes rename nothing.
+        w.bulkRenameWith([](const QStringList &lines) { return lines.mid(1); });
+        QVERIFY(!w.prompt()->isOpen());
+        w.bulkRenameWith([](const QStringList &lines) {
+            QStringList out = lines;
+            out.last() = QStringLiteral("x/y");
+            return out;
+        });
+        QVERIFY(!w.prompt()->isOpen());
+        QVERIFY(QFile::exists(base + QStringLiteral("/notes.md")));
+    }
+
+    void bulkRenameRunsEditorInTerminal() {
+        const QString base = makeTree();
+        // A stand-in terminal that runs its -e command line directly.
+        const QString term = m_root.path() + QStringLiteral("/fake-term");
+        writeFile(term, "#!/bin/sh\n[ \"$1\" = -e ] && shift\nexec \"$@\"\n");
+        QVERIFY(chmod(QFile::encodeName(term).constData(), 0755) == 0);
+        qputenv("TERMINAL", term.toLocal8Bit());
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.runCommandLine(QStringLiteral("set editor sed -i s/file/doc/"));
+        w.runCommandLine(QStringLiteral("bulk-rename"));
+        QTRY_VERIFY_WITH_TIMEOUT(w.prompt()->isOpen(), 10000);
+        QCOMPARE(w.picker()->items().size(), 2);
+        keys(w, QStringLiteral("y"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/doc2.txt")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/doc10.txt")));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/file2.txt")));
+
+        // A failing editor renames nothing.
+        w.runCommandLine(QStringLiteral("set editor false"));
+        w.runCommandLine(QStringLiteral("bulk-rename"));
+        QTRY_VERIFY_WITH_TIMEOUT(w.statusBar()->message().contains(QStringLiteral("status 1")), 10000);
+        QVERIFY(!w.prompt()->isOpen());
+        qunsetenv("TERMINAL");
+    }
+
+    void chooserOpenSaveAndFolders() {
+        const QString base = makeTree();
+        {
+            ChooserRequest req;
+            req.filters = {FileFilter{QStringLiteral("Markdown"), {{0u, QStringLiteral("*.md")}}},
+                           FileFilter{QStringLiteral("Text"), {{1u, QStringLiteral("text/plain")}}}};
+            req.currentFilter = 0;
+            ChooserResult got;
+            int calls = 0;
+            MainWindow w(base, false);
+            w.setChooser(req, [&](const ChooserResult &r) {
+                got = r;
+                ++calls;
+            });
+            w.show();
+            QTRY_VERIFY(w.isIdle());
+            QCOMPARE(w.currentModel()->rowOf(QStringLiteral("file2.txt")), -1);
+            QVERIFY(w.currentModel()->rowOf(QStringLiteral("alpha")) >= 0);
+            keys(w, QStringLiteral("G"));
+            QCOMPARE(currentName(w), QStringLiteral("notes.md"));
+            key(w, Qt::Key_Return);
+            QCOMPARE(calls, 1);
+            QVERIFY(got.accepted);
+            QCOMPARE(got.paths, QStringList{base + QStringLiteral("/notes.md")});
+            QCOMPARE(got.filter, 0);
+            QTRY_VERIFY(!w.isVisible());
+        }
+        {
+            ChooserRequest req;
+            req.directory = true;
+            ChooserResult got;
+            MainWindow w(base, false);
+            w.setChooser(req, [&](const ChooserResult &r) { got = r; });
+            w.show();
+            QTRY_VERIFY(w.isIdle());
+            QCOMPARE(w.currentModel()->rowOf(QStringLiteral("notes.md")), -1);
+            keys(w, QStringLiteral("l"));
+            QTRY_VERIFY(w.isIdle());
+            QCOMPARE(w.cwd(), base + QStringLiteral("/alpha"));
+            key(w, Qt::Key_Return, Qt::ControlModifier);
+            QVERIFY(got.accepted);
+            QCOMPARE(got.paths, QStringList{base + QStringLiteral("/alpha")});
+        }
+        {
+            ChooserRequest req;
+            req.mode = ChooserRequest::Mode::Save;
+            req.currentName = QStringLiteral("report.pdf");
+            req.currentFolder = base + QStringLiteral("/beta");
+            ChooserResult got;
+            int calls = 0;
+            MainWindow w(base, false);
+            w.setChooser(req, [&](const ChooserResult &r) {
+                got = r;
+                ++calls;
+            });
+            w.show();
+            QTRY_VERIFY(w.isIdle());
+            QCOMPARE(w.cwd(), base + QStringLiteral("/beta"));
+            QLineEdit *name = w.chooserBar()->nameEdit();
+            QTRY_VERIFY(name->hasFocus());
+            QCOMPARE(name->selectedText(), QStringLiteral("report"));
+            // Saving over an existing file asks first.
+            name->setText(QStringLiteral("../notes.md"));
+            QTest::keyClick(name, Qt::Key_Return);
+            QVERIFY(w.prompt()->isOpen());
+            keys(w, QStringLiteral("n"));
+            QCOMPARE(calls, 0);
+            name->setText(QStringLiteral("fresh.txt"));
+            QTest::keyClick(name, Qt::Key_Return);
+            QCOMPARE(calls, 1);
+            QCOMPARE(got.paths, QStringList{base + QStringLiteral("/beta/fresh.txt")});
+        }
+        {
+            ChooserResult got;
+            got.accepted = true;
+            int calls = 0;
+            auto *w = new MainWindow(base, false);
+            w->setChooser(ChooserRequest{}, [&](const ChooserResult &r) {
+                got = r;
+                ++calls;
+            });
+            w->show();
+            QTRY_VERIFY(w->isIdle());
+            key(*w, Qt::Key_Escape);
+            QCOMPARE(calls, 1);
+            QVERIFY(!got.accepted);
+            delete w;
+            QCOMPARE(calls, 1);
+        }
+    }
+
+    void portalOptionsAndResults() {
+        service::registerTypes();
+        QVariantMap options;
+        options.insert(QStringLiteral("multiple"), true);
+        options.insert(QStringLiteral("accept_label"), QStringLiteral("_Upload"));
+        options.insert(QStringLiteral("current_folder"), QByteArray("/tmp\0", 5));
+        const QList<FileFilter> filters = {FileFilter{QStringLiteral("Images"), {{1u, QStringLiteral("image/*")}}},
+                                           FileFilter{QStringLiteral("All"), {{0u, QStringLiteral("*")}}}};
+        options.insert(QStringLiteral("filters"), QVariant::fromValue(filters));
+        options.insert(QStringLiteral("current_filter"), QVariant::fromValue(filters[1]));
+        const ChooserRequest r = service::requestFromOptions(ChooserRequest::Mode::Open, QStringLiteral("Pick"), options);
+        QVERIFY(r.multiple);
+        QCOMPARE(r.currentFolder, QStringLiteral("/tmp"));
+        QCOMPARE(r.filters.size(), 2);
+        QCOMPARE(r.currentFilter, 1);
+        QCOMPARE(r.acceptLabel, QStringLiteral("_Upload"));
+
+        FileEntry png;
+        png.name = QStringLiteral("cat.PNG");
+        QVERIFY(r.filters[0].accepts(png));
+        FileEntry txt;
+        txt.name = QStringLiteral("notes.txt");
+        QVERIFY(!r.filters[0].accepts(txt));
+
+        ChooserResult result;
+        result.accepted = true;
+        result.paths = {QStringLiteral("/tmp/a b.png")};
+        result.filter = 0;
+        const QVariantMap out = service::resultsFromChooser(r, result);
+        QCOMPARE(out.value(QStringLiteral("uris")).toStringList(), QStringList{QStringLiteral("file:///tmp/a%20b.png")});
+        QVERIFY(out.contains(QStringLiteral("current_filter")));
+        QVERIFY(service::resultsFromChooser(r, ChooserResult{}).isEmpty());
+    }
+
+    void showItemsGroupsByFolder() {
+        const QString base = makeTree();
+        const QList<MainWindow *> windows = service::showItems(
+            {QUrl::fromLocalFile(base + QStringLiteral("/notes.md")).toString(), base + QStringLiteral("/file2.txt"),
+             base + QStringLiteral("/alpha/one.md")},
+            false);
+        QCOMPARE(windows.size(), 2);
+        windows[0]->show();
+        QTRY_VERIFY(windows[0]->isIdle());
+        QCOMPARE(windows[0]->cwd(), base);
+        QCOMPARE(currentName(*windows[0]), QStringLiteral("notes.md"));
+        QCOMPARE(windows[0]->marks()->size(), 2);
+        QCOMPARE(windows[1]->cwd(), base + QStringLiteral("/alpha"));
+        qDeleteAll(windows);
     }
 };
 

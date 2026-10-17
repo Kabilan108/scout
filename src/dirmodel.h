@@ -7,6 +7,8 @@
 #include <QTimer>
 #include <QVector>
 
+#include <functional>
+
 #include <sys/types.h>
 
 struct FileEntry {
@@ -79,6 +81,8 @@ public:
     void setOptions(const ViewOptions &options);
     void setFilter(const QString &filter);
     QString filter() const { return m_filter; }
+    // Hides files (never folders) the predicate rejects; the file chooser's type filter.
+    void setFileFilter(std::function<bool(const FileEntry &)> accept);
 
     const FileEntry *entry(int row) const;
     int rowOf(const QString &name) const;
@@ -110,6 +114,7 @@ private:
     QVector<int> m_rows;
     ViewOptions m_options;
     QString m_filter;
+    std::function<bool(const FileEntry &)> m_fileFilter;
     QString m_error;
     bool m_loaded = false;
     bool m_loading = false;

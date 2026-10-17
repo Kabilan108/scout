@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "service.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -35,9 +36,14 @@ int main(int argc, char *argv[]) {
     parser.addPositionalArgument(QStringLiteral("path"), QStringLiteral("Folder to open, or a file to reveal."));
     QCommandLineOption noConfig(QStringLiteral("no-config"), QStringLiteral("Ignore ~/.config/scout/scout.conf."));
     parser.addOption(noConfig);
+    QCommandLineOption serviceMode(QStringLiteral("service"),
+                                   QStringLiteral("Run the D-Bus service: org.freedesktop.FileManager1 and the file chooser portal."));
+    parser.addOption(serviceMode);
     parser.process(app);
 
     Theme::instance().init();
+    if (parser.isSet(serviceMode))
+        return service::run();
 
     const QStringList paths = parser.positionalArguments();
     MainWindow window(paths.value(0, QDir::currentPath()), !parser.isSet(noConfig));

@@ -124,8 +124,11 @@ QString KeyMap::tokenFor(const QKeyEvent *event) {
     QString name = keyName(key);
     if (name.isEmpty())
         return {};
-    if (name == QLatin1String("S-Tab"))
-        return QStringLiteral("<S-Tab>");
+    bool shifted = shift;
+    if (name == QLatin1String("S-Tab")) {
+        name = QStringLiteral("Tab");
+        shifted = true;
+    }
     QStringList parts;
     if (ctrl)
         parts << QStringLiteral("C");
@@ -133,7 +136,7 @@ QString KeyMap::tokenFor(const QKeyEvent *event) {
         parts << QStringLiteral("A");
     // Shift on a printable key is already part of the character.
     const bool namedKey = name.size() > 1;
-    if (shift && (namedKey || ctrl || alt))
+    if (shifted && (namedKey || ctrl || alt))
         parts << QStringLiteral("S");
     if (parts.isEmpty())
         return name.size() == 1 ? name : QStringLiteral("<%1>").arg(name);

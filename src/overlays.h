@@ -17,14 +17,23 @@ class HeaderBar : public QWidget {
 public:
     explicit HeaderBar(QWidget *parent = nullptr);
     void setPath(const QString &dir, const QString &name);
+    // Tab labels shown on the right; hidden while there is only one tab.
+    void setTabs(const QStringList &labels, int active);
     QSize sizeHint() const override;
+
+signals:
+    void tabClicked(int index);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
 
 private:
     QString m_dir;
     QString m_name;
+    QStringList m_tabs;
+    int m_activeTab = 0;
+    QList<QRect> m_tabRects;
 };
 
 class StatusBar : public QWidget {

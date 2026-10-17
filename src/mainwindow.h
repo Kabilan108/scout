@@ -6,6 +6,9 @@
 #include <QTimer>
 #include <QWidget>
 
+#include <memory>
+
+#include "chooser.h"
 #include "clipboard.h"
 #include "columnview.h"
 #include "commands.h"
@@ -17,6 +20,8 @@
 #include "overlays.h"
 #include "preview.h"
 #include "prompt.h"
+
+class QTemporaryDir;
 
 class MainWindow : public QWidget {
     Q_OBJECT
@@ -44,14 +49,45 @@ public:
     bool cd(const QString &path, const QString &selectName = {}, bool recordHistory = true);
     QStringList targets() const;
 
+    int tabCount() const { return int(m_tabs.size()); }
+    int currentTab() const { return m_tab; }
+    int undoDepth() const { return int(m_undo.size()); }
+    // Applies renames and records them for undo; returns false if anything failed.
+    bool applyRenames(const QList<QPair<QString, QString>> &renames, bool recordUndo = true);
+    // Bulk rename without an editor: `edit` receives the lines and returns the edited lines.
+    void bulkRenameWith(const std::function<QStringList(const QStringList &)> &edit);
+
+    // Turns this window into a file chooser. `done` runs exactly once, when the
+    // user accepts or cancels, or the window closes.
+    void setChooser(const ChooserRequest &request, std::function<void(const ChooserResult &)> done);
+    bool isChooser() const { return m_chooserBar != nullptr; }
+    ChooserBar *chooserBar() const { return m_chooserBar; }
+    void finishChooser(bool accepted);
+
 protected:
+    void closeEvent(QCloseEvent *event) override;
     bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;
 
 private:
     enum class Overlay { None, Tasks, Properties };
+
+    struct Tab {
+        QString cwd;
+        QStringList back;
+        QStringList forward;
+        QHash<QString, QString> lastSelected;
+        int lastRow = 0;
+    };
+
+    struct UndoStep {
+        enum Kind { Moves, Renames, Restored } kind;
+        QString description;
+        QList<QPair<QString, QString>> pairs; // (original, current)
+    };
 
     void buildUi();
     void registerCommands();
@@ -77,7 +113,7 @@ private:
     void openTargets();
     void openWith(const DesktopApp &app, const QStringList &paths);
     void showOpenWith();
-    void handleEscape();
+    bool handleEscape();
     void handleOverlayKey(QKeyEvent *event);
     void showWhichKey();
     void hideWhichKey();
@@ -104,6 +140,27 @@ private:
     void showHelp();
     void showContextMenu(int row, const QPoint &globalPos);
     void openPrompt(PromptSpec spec);
+
+    void saveTab();
+    void loadTab(int index);
+    void newTab(const QString &path);
+    void closeTab();
+    void updateTabs();
+
+    void pushUndo(UndoStep step);
+    void undo();
+    void restoreFromTrash();
+    void confirmEmptyTrash();
+
+    void bulkRename();
+    void startBulkRename(const QStringList &paths);
+    void finishBulkRename(const QStringList &paths, const QStringList &lines);
+    QString editorCommand() const;
+
+    void chooserAccept(bool fromCursor);
+    void chooserAcceptPaths(const QStringList &paths);
+    void chooserSave(const QString &name);
+    void updateChooserHint();
 
     // Models and views
     Marks m_marks;
@@ -145,6 +202,26 @@ private:
     bool m_finderActive = false;
     qint64 m_quitArmedAt = 0;
     QTimer m_finderTimer;
+
+    // Tabs
+    QList<Tab> m_tabs;
+    int m_tab = 0;
+    QList<Tab> m_closedTabs;
+
+    // Undo
+    QList<UndoStep> m_undo;
+    QSet<Task *> m_undoTasks;
+
+    // Bulk rename
+    std::unique_ptr<QTemporaryDir> m_renameDir;
+    QStringList m_renamePaths;
+    QTimer m_renamePoll;
+    QString m_editor;
+
+    // File chooser
+    ChooserRequest m_chooser;
+    ChooserBar *m_chooserBar = nullptr;
+    std::function<void(const ChooserResult &)> m_chooserDone;
 
     TaskManager m_tasks;
     KeyMap m_keys;

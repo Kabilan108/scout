@@ -5,6 +5,7 @@
 #include "theme.h"
 
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -17,8 +18,10 @@
 #include <QMimeDatabase>
 #include <QPointer>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTextStream>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -113,6 +116,8 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
     m_finderTimer.setSingleShot(true);
     m_finderTimer.setInterval(80);
     connect(&m_finderTimer, &QTimer::timeout, this, &MainWindow::updateFinderList);
+    m_renamePoll.setInterval(250);
+    m_tabs.append(Tab{});
 
     buildUi();
     registerCommands();
@@ -132,7 +137,11 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
     }
 }
 
-MainWindow::~MainWindow() { m_walker.cancel(); }
+MainWindow::~MainWindow() {
+    m_walker.cancel();
+    if (auto done = std::exchange(m_chooserDone, {}))
+        done(ChooserResult{});
+}
 
 void MainWindow::buildUi() {
     auto *layout = new QVBoxLayout(this);
@@ -173,6 +182,10 @@ void MainWindow::buildUi() {
     m_tasksView = new TasksView(&m_tasks, this);
     m_properties = new PropertiesView(this);
 
+    connect(m_header, &HeaderBar::tabClicked, this, [this](int index) {
+        saveTab();
+        loadTab(index);
+    });
     connect(m_currentView->selectionModel(), &QItemSelectionModel::currentChanged, this, &MainWindow::onCursorMoved);
     connect(m_currentModel, &DirModel::refreshed, this, &MainWindow::onCurrentRefreshed);
     connect(m_parentModel, &DirModel::refreshed, this, &MainWindow::onParentRefreshed);
@@ -286,6 +299,8 @@ void MainWindow::applyTheme() {
     style(m_preview->dirView(), pal.base);
     m_preview->applyTheme();
     m_prompt->applyTheme();
+    if (m_chooserBar)
+        m_chooserBar->applyTheme();
     const int barHeight = Theme::instance().rowHeight() + 8;
     m_bottom->setFixedHeight(barHeight);
     m_header->setFixedHeight(barHeight);
@@ -363,7 +378,11 @@ bool MainWindow::cd(const QString &path, const QString &selectName, bool recordH
     m_cwd = target;
     m_pendingSelect = selectName;
     m_lastRow = 0;
+    // Switching tabs can land on the folder the model already shows.
+    const bool alreadyLoaded = m_currentModel->path() == target && m_currentModel->isLoaded();
     m_currentModel->setPath(target);
+    if (alreadyLoaded)
+        onCurrentRefreshed();
     const QString parent = parentDir(target);
     if (parent.isEmpty()) {
         m_parentModel->clearPath();
@@ -373,9 +392,11 @@ bool MainWindow::cd(const QString &path, const QString &selectName, bool recordH
         if (already)
             onParentRefreshed();
     }
-    setWindowTitle(QStringLiteral("scout — %1").arg(tilde(target)));
+    if (!isChooser())
+        setWindowTitle(QStringLiteral("scout — %1").arg(tilde(target)));
     updateHeader();
     updateStatus();
+    updateChooserHint();
     return true;
 }
 
@@ -440,6 +461,7 @@ void MainWindow::updatePreview() {
 void MainWindow::updateHeader() {
     const FileEntry *e = currentEntry();
     m_header->setPath(m_cwd, e ? e->name : QString());
+    updateTabs();
 }
 
 void MainWindow::updateStatus() {
@@ -516,8 +538,12 @@ void MainWindow::leave() {
 
 void MainWindow::openTargets() {
     QStringList paths = targets();
-    if (paths.size() == 1 && QFileInfo(paths.first()).isDir()) {
+    if (paths.size() == 1 && QFileInfo(paths.first()).isDir() && !(isChooser() && m_chooser.multiple && !m_marks.isEmpty())) {
         cd(paths.first());
+        return;
+    }
+    if (isChooser()) {
+        chooserAccept(true);
         return;
     }
     paths.erase(std::remove_if(paths.begin(), paths.end(), [](const QString &p) { return QFileInfo(p).isDir(); }),
@@ -631,6 +657,12 @@ void MainWindow::openPrompt(PromptSpec spec) {
 bool MainWindow::event(QEvent *event) {
     if (event->type() == QEvent::KeyPress && !m_prompt->isOpen()) {
         auto *key = static_cast<QKeyEvent *>(event);
+        const bool plainTab = (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab) &&
+                              !(key->modifiers() & (Qt::ControlModifier | Qt::AltModifier));
+        if (plainTab && m_chooserBar && m_chooserBar->nameEdit()) {
+            m_chooserBar->nameEdit()->setFocus(Qt::TabFocusReason);
+            return true;
+        }
         if (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab) {
             keyPressEvent(key);
             return true;
@@ -655,8 +687,8 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
             hideWhichKey();
             m_ambiguityTimer.stop();
             updateStatus();
-        } else {
-            handleEscape();
+        } else if (!handleEscape() && isChooser()) {
+            finishChooser(false);
         }
         return;
     }
@@ -683,7 +715,8 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     updateStatus();
 }
 
-void MainWindow::handleEscape() {
+bool MainWindow::handleEscape() {
+    bool handled = true;
     if (!m_currentModel->filter().isEmpty()) {
         m_currentModel->setFilter({});
         message(QStringLiteral("filter cleared"));
@@ -694,8 +727,11 @@ void MainWindow::handleEscape() {
     } else if (!m_register.paths.isEmpty()) {
         m_register = {};
         message(QStringLiteral("clipboard selection dropped"));
+    } else {
+        handled = false;
     }
     updateStatus();
+    return handled;
 }
 
 void MainWindow::showWhichKey() {
@@ -887,7 +923,7 @@ void MainWindow::startTask(Task::Kind kind, const QStringList &paths, const QStr
 
 void MainWindow::onTaskFinished(Task *task) {
     const Task::Progress p = task->progress();
-    static const char *done[] = {"copied", "moved", "linked", "trashed", "deleted"};
+    static const char *done[] = {"copied", "moved", "linked", "trashed", "deleted", "restored"};
     const QString summary = QStringLiteral("%1 %2").arg(QLatin1String(done[task->kind()]),
                                                         plural(int(task->sources().size()), "item"));
     switch (p.state) {
@@ -904,6 +940,29 @@ void MainWindow::onTaskFinished(Task *task) {
         break;
     case Task::Running:
         break;
+    }
+    if (!m_undoTasks.remove(task)) {
+        const QString what = task->sources().size() == 1 ? baseName(task->sources().first())
+                                                         : plural(int(task->sources().size()), "item");
+        switch (task->kind()) {
+        case Task::Move:
+        case Task::Trash:
+            if (!p.moved.isEmpty())
+                pushUndo({UndoStep::Moves, QStringLiteral("%1 %2").arg(QLatin1String(done[task->kind()]), what), p.moved});
+            break;
+        case Task::Copy:
+        case Task::Link:
+        case Task::Restore: {
+            QList<QPair<QString, QString>> created;
+            for (const QString &c : p.created)
+                created.append({QString(), c});
+            if (!created.isEmpty())
+                pushUndo({UndoStep::Restored, QStringLiteral("%1 %2").arg(QLatin1String(done[task->kind()]), what), created});
+            break;
+        }
+        case Task::Delete:
+            break;
+        }
     }
     if (!p.created.isEmpty() && parentDir(p.created.first()) == m_cwd)
         m_pendingSelect = baseName(p.created.first());
@@ -935,6 +994,7 @@ void MainWindow::promptRename() {
             error(problem);
             return;
         }
+        pushUndo({UndoStep::Renames, QStringLiteral("rename %1").arg(oldName), {{from, to}}});
         if (parentDir(to) == m_cwd) {
             m_lastSelected[m_cwd] = baseName(to);
             m_pendingSelect = baseName(to);
@@ -1247,7 +1307,8 @@ void MainWindow::updateCommandList(const QString &text) {
             options = {QStringLiteral("name"), QStringLiteral("size"), QStringLiteral("modified"), QStringLiteral("extension")};
         else if (name == QLatin1String("set") && fixed.isEmpty())
             options = {QStringLiteral("hidden"), QStringLiteral("theme"), QStringLiteral("font"), QStringLiteral("font-size"),
-                       QStringLiteral("sort"), QStringLiteral("reverse"), QStringLiteral("dirs-first"), QStringLiteral("preview")};
+                       QStringLiteral("sort"), QStringLiteral("reverse"), QStringLiteral("dirs-first"), QStringLiteral("preview"),
+                       QStringLiteral("editor")};
         else if (name == QLatin1String("set") && fixed.value(0) == QLatin1String("theme"))
             options = {QStringLiteral("auto"), QStringLiteral("dark"), QStringLiteral("light")};
         if (!options.isEmpty()) {
@@ -1492,19 +1553,31 @@ void MainWindow::registerCommands() {
         startTask(Task::Trash, paths, {});
     });
     cmd(QStringLiteral("delete"), QStringLiteral("Delete permanently (asks first)"), [this](const CommandContext &) { confirmDelete(); });
-    cmd(QStringLiteral("rename"), QStringLiteral("Rename the entry under the cursor"), [this](const CommandContext &c) {
+    cmd(QStringLiteral("undo"), QStringLiteral("Undo the last trash, move, rename or copy"), [this](const CommandContext &) { undo(); });
+    cmd(QStringLiteral("restore"), QStringLiteral("Restore trashed items to where they came from"),
+        [this](const CommandContext &) { restoreFromTrash(); });
+    cmd(QStringLiteral("empty-trash"), QStringLiteral("Permanently delete everything in the trash (asks first)"),
+        [this](const CommandContext &) { confirmEmptyTrash(); });
+    cmd(QStringLiteral("bulk-rename"), QStringLiteral("Rename marked items (or the whole folder) in $EDITOR"),
+        [this](const CommandContext &) { bulkRename(); });
+    cmd(QStringLiteral("rename"), QStringLiteral("Rename the entry under the cursor (several marked: bulk rename)"), [this](const CommandContext &c) {
         if (c.args.isEmpty()) {
-            promptRename();
+            if (m_marks.size() > 1)
+                bulkRename();
+            else
+                promptRename();
             return;
         }
         const FileEntry *e = currentEntry();
         if (!e)
             return;
+        const QString from = e->path;
         const QString to = QDir::cleanPath(QDir(m_cwd).filePath(expandHome(c.args.join(u' '))));
-        if (const QString problem = renamePath(e->path, to); !problem.isEmpty()) {
+        if (const QString problem = renamePath(from, to); !problem.isEmpty()) {
             error(problem);
             return;
         }
+        pushUndo({UndoStep::Renames, QStringLiteral("rename %1").arg(baseName(from)), {{from, to}}});
         m_pendingSelect = baseName(to);
         m_currentModel->reload();
     }, QStringLiteral("[name]"));
@@ -1630,6 +1703,46 @@ void MainWindow::registerCommands() {
         const QStringList args = QCoreApplication::arguments();
         QProcess::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd});
     });
+    cmd(QStringLiteral("new-tab"), QStringLiteral("Open a tab here (or at a path)"), [this](const CommandContext &c) {
+        newTab(c.args.isEmpty() ? m_cwd : c.args.join(u' '));
+    }, QStringLiteral("[path]"));
+    cmd(QStringLiteral("close-tab"), QStringLiteral("Close this tab (the window, if it is the last)"), [this](const CommandContext &) {
+        if (m_tabs.size() > 1)
+            closeTab();
+        else
+            runCommandLine(QStringLiteral("quit"));
+    });
+    cmd(QStringLiteral("next-tab"), QStringLiteral("Go to the next tab"), [this](const CommandContext &c) {
+        if (m_tabs.size() < 2)
+            return;
+        saveTab();
+        loadTab(c.count > 0 ? c.count - 1 : (m_tab + 1) % int(m_tabs.size()));
+    });
+    cmd(QStringLiteral("prev-tab"), QStringLiteral("Go to the previous tab"), [this](const CommandContext &c) {
+        if (m_tabs.size() < 2)
+            return;
+        saveTab();
+        const int n = int(m_tabs.size());
+        loadTab(((m_tab - c.countOr(1)) % n + n) % n);
+    });
+    cmd(QStringLiteral("tab"), QStringLiteral("Go to tab N"), [this](const CommandContext &c) {
+        const int n = c.args.value(0).toInt();
+        if (n < 1 || n > m_tabs.size()) {
+            error(QStringLiteral("no tab %1").arg(c.args.value(0)));
+            return;
+        }
+        saveTab();
+        loadTab(n - 1);
+    }, QStringLiteral("<n>"), true);
+    cmd(QStringLiteral("reopen-tab"), QStringLiteral("Reopen the last closed tab"), [this](const CommandContext &) {
+        if (m_closedTabs.isEmpty()) {
+            message(QStringLiteral("no closed tabs"));
+            return;
+        }
+        saveTab();
+        m_tabs.insert(m_tab + 1, m_closedTabs.takeLast());
+        loadTab(m_tab + 1);
+    });
     cmd(QStringLiteral("quit"), QStringLiteral("Close the window"), [this](const CommandContext &) {
         const int active = m_tasks.activeCount();
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -1640,6 +1753,16 @@ void MainWindow::registerCommands() {
             return;
         }
         close();
+    });
+
+    cmd(QStringLiteral("choose"), QStringLiteral("File chooser: accept the marked items, this folder, or the file name"),
+        [this](const CommandContext &) {
+            if (isChooser())
+                chooserAccept(false);
+        });
+    cmd(QStringLiteral("choose-filter"), QStringLiteral("File chooser: next file type filter"), [this](const CommandContext &) {
+        if (m_chooserBar)
+            m_chooserBar->cycleFilter();
     });
 
     // Configuration
@@ -1665,6 +1788,8 @@ void MainWindow::registerCommands() {
             Theme::instance().setMode(v == QLatin1String("dark")    ? ThemeMode::Dark
                                       : v == QLatin1String("light") ? ThemeMode::Light
                                                                     : ThemeMode::Auto);
+        } else if (key == QLatin1String("editor")) {
+            m_editor = value;
         } else if (key == QLatin1String("font")) {
             Theme::instance().setFontFamily(value);
         } else if (key == QLatin1String("font-size")) {
@@ -1741,11 +1866,15 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("gD"), QStringLiteral("cd ~/Documents"), QStringLiteral("Documents"));
     bind(QStringLiteral("gp"), QStringLiteral("cd ~/Pictures"), QStringLiteral("Pictures"));
     bind(QStringLiteral("gv"), QStringLiteral("cd ~/Videos"), QStringLiteral("Videos"));
-    bind(QStringLiteral("gm"), QStringLiteral("cd ~/Music"), QStringLiteral("Music"));
+    bind(QStringLiteral("gM"), QStringLiteral("cd ~/Music"), QStringLiteral("Music"));
     bind(QStringLiteral("gc"), QStringLiteral("cd ~/.config"), QStringLiteral("~/.config"));
     bind(QStringLiteral("gr"), QStringLiteral("cd ~/repos"), QStringLiteral("~/repos"));
     bind(QStringLiteral("g/"), QStringLiteral("cd /"), QStringLiteral("Root /"));
-    bind(QStringLiteral("gt"), QStringLiteral("cd ~/.local/share/Trash/files"), QStringLiteral("Trash"));
+    bind(QStringLiteral("gb"), QStringLiteral("cd ~/.local/share/Trash/files"), QStringLiteral("Trash (bin)"));
+    bind(QStringLiteral("gm"), QStringLiteral("cd /run/media"), QStringLiteral("Mounted drives"));
+    bind(QStringLiteral("gt"), QStringLiteral("next-tab"));
+    bind(QStringLiteral("gT"), QStringLiteral("prev-tab"));
+    bind(QStringLiteral("gn"), QStringLiteral("new-tab"));
     bind(QStringLiteral("gf"), QStringLiteral("find"));
     bind(QStringLiteral("gx"), QStringLiteral("open"));
     bind(QStringLiteral("<C-p>"), QStringLiteral("find"));
@@ -1754,6 +1883,10 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("v"), QStringLiteral("invert-marks"));
     bind(QStringLiteral("<C-a>"), QStringLiteral("mark-all"));
     bind(QStringLiteral("uv"), QStringLiteral("unmark-all"));
+    bind(QStringLiteral("uu"), QStringLiteral("undo"));
+    bind(QStringLiteral("<C-z>"), QStringLiteral("undo"));
+    bind(QStringLiteral("ur"), QStringLiteral("restore"), QStringLiteral("Restore from trash"));
+    bind(QStringLiteral("uq"), QStringLiteral("reopen-tab"));
 
     bind(QStringLiteral("yy"), QStringLiteral("copy"));
     bind(QStringLiteral("yp"), QStringLiteral("copy-path"));
@@ -1772,6 +1905,7 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("r"), QStringLiteral("rename"));
     bind(QStringLiteral("cw"), QStringLiteral("rename"));
     bind(QStringLiteral("<F2>"), QStringLiteral("rename"));
+    bind(QStringLiteral("R"), QStringLiteral("bulk-rename"));
     bind(QStringLiteral("a"), QStringLiteral("create"));
     bind(QStringLiteral("A"), QStringLiteral("create-folder"));
     bind(QStringLiteral("o"), QStringLiteral("open-with"));
@@ -1802,9 +1936,14 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("<C-=>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-+>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-->"), QStringLiteral("zoom-out"));
-    bind(QStringLiteral("q"), QStringLiteral("quit"));
+    bind(QStringLiteral("q"), QStringLiteral("close-tab"));
     bind(QStringLiteral("<C-q>"), QStringLiteral("quit"));
-    bind(QStringLiteral("<C-w>"), QStringLiteral("quit"));
+    bind(QStringLiteral("<C-w>"), QStringLiteral("close-tab"));
+    bind(QStringLiteral("<C-t>"), QStringLiteral("new-tab"));
+    bind(QStringLiteral("<C-Tab>"), QStringLiteral("next-tab"));
+    bind(QStringLiteral("<C-S-Tab>"), QStringLiteral("prev-tab"));
+    for (int i = 1; i <= 9; ++i)
+        bind(QStringLiteral("<A-%1>").arg(i), QStringLiteral("tab %1").arg(i), QStringLiteral("Go to tab %1").arg(i));
 }
 
 void MainWindow::loadConfig() {
@@ -1830,4 +1969,597 @@ void MainWindow::loadConfig() {
     }
     if (!problems.isEmpty())
         error(QStringLiteral("scout.conf: ") + problems.join(QStringLiteral("; ")));
+}
+
+// Tabs
+
+void MainWindow::saveTab() {
+    Tab &t = m_tabs[m_tab];
+    t.cwd = m_cwd;
+    t.back = m_back;
+    t.forward = m_forward;
+    t.lastSelected = m_lastSelected;
+    t.lastRow = m_lastRow;
+}
+
+void MainWindow::loadTab(int index) {
+    if (index < 0 || index >= m_tabs.size())
+        return;
+    m_tab = index;
+    const Tab t = m_tabs[index];
+    m_back = t.back;
+    m_forward = t.forward;
+    m_lastSelected = t.lastSelected;
+    const QString path = t.cwd.isEmpty() ? QDir::homePath() : t.cwd;
+    m_currentModel->setFilter({});
+    m_cwd.clear();
+    if (!cd(path, m_lastSelected.value(path), false))
+        cd(QDir::homePath(), {}, false);
+    m_lastRow = t.lastRow;
+    updateTabs();
+}
+
+void MainWindow::newTab(const QString &path) {
+    saveTab();
+    Tab t;
+    t.lastSelected = m_lastSelected;
+    m_tabs.insert(m_tab + 1, t);
+    m_tab += 1;
+    m_back.clear();
+    m_forward.clear();
+    const QString from = m_cwd;
+    m_cwd.clear();
+    if (!cd(path, {}, false))
+        cd(from.isEmpty() ? QDir::homePath() : from, {}, false);
+    updateTabs();
+}
+
+void MainWindow::closeTab() {
+    saveTab();
+    m_closedTabs.append(m_tabs.takeAt(m_tab));
+    loadTab(std::min(m_tab, int(m_tabs.size()) - 1));
+}
+
+void MainWindow::updateTabs() {
+    QStringList labels;
+    const QString home = QDir::homePath();
+    for (int i = 0; i < m_tabs.size(); ++i) {
+        const QString dir = i == m_tab ? m_cwd : m_tabs[i].cwd;
+        labels << (dir == home ? QStringLiteral("~") : dir == QLatin1String("/") ? dir : baseName(dir));
+    }
+    m_header->setTabs(labels, m_tab);
+}
+
+// Undo
+
+void MainWindow::pushUndo(UndoStep step) {
+    m_undo.append(std::move(step));
+    while (m_undo.size() > 100)
+        m_undo.removeFirst();
+}
+
+void MainWindow::undo() {
+    if (m_undo.isEmpty()) {
+        message(QStringLiteral("nothing to undo"));
+        return;
+    }
+    const UndoStep step = m_undo.takeLast();
+    QList<QPair<QString, QString>> back;
+    QStringList current;
+    for (const auto &[original, now] : step.pairs) {
+        back.append({now, original});
+        current << now;
+    }
+    switch (step.kind) {
+    case UndoStep::Moves:
+        m_undoTasks.insert(m_tasks.startRestore(back));
+        message(QStringLiteral("undoing %1…").arg(step.description));
+        break;
+    case UndoStep::Renames:
+        if (applyRenames(back, false))
+            message(QStringLiteral("undid %1").arg(step.description), StatusBar::Level::Success);
+        break;
+    case UndoStep::Restored:
+        m_undoTasks.insert(m_tasks.start(Task::Trash, current));
+        message(QStringLiteral("undoing %1 (moving to the trash)…").arg(step.description));
+        break;
+    }
+}
+
+void MainWindow::restoreFromTrash() {
+    QList<QPair<QString, QString>> moves;
+    QStringList notTrashed;
+    for (const QString &p : targets()) {
+        const QString original = trashOriginalPath(p);
+        if (original.isEmpty())
+            notTrashed << baseName(p);
+        else
+            moves.append({p, original});
+    }
+    if (moves.isEmpty()) {
+        error(notTrashed.isEmpty() ? QStringLiteral("nothing to restore")
+                                   : QStringLiteral("not in the trash: %1").arg(notTrashed.join(QStringLiteral(", "))));
+        return;
+    }
+    m_marks.clear();
+    Task *task = m_tasks.startRestore(moves);
+    message(task->title() + QStringLiteral("…"));
+}
+
+void MainWindow::confirmEmptyTrash() {
+    const QString trash = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/Trash");
+    QStringList paths;
+    QString err;
+    for (const char *sub : {"files", "info"})
+        for (const FileEntry &e : listDirectory(trash + u'/' + QLatin1String(sub), &err))
+            paths << e.path;
+    if (paths.isEmpty()) {
+        message(QStringLiteral("the trash is empty"));
+        return;
+    }
+    PromptSpec spec;
+    spec.label = QStringLiteral("permanently delete everything in the trash? [y/N]");
+    spec.onChange = [this, paths](const QString &text) {
+        if (text.isEmpty())
+            return;
+        m_prompt->close(true);
+        if (text == QLatin1String("y") || text == QLatin1String("Y"))
+            startTask(Task::Delete, paths, {});
+        else
+            message(QStringLiteral("trash left alone"));
+    };
+    spec.onAccept = [this](const QString &, const PickerItem *) { message(QStringLiteral("trash left alone")); };
+    openPrompt(spec);
+}
+
+// Bulk rename
+
+bool MainWindow::applyRenames(const QList<QPair<QString, QString>> &renames, bool recordUndo) {
+    QStringList errors;
+    const QList<QPair<QString, QString>> done = renameAll(renames, &errors);
+    QStringList unmark, mark;
+    for (const auto &[from, to] : done) {
+        if (m_marks.contains(from)) {
+            unmark << from;
+            mark << to;
+        }
+        if (parentDir(from) == m_cwd && m_lastSelected.value(m_cwd) == baseName(from) && parentDir(to) == m_cwd)
+            m_pendingSelect = baseName(to);
+    }
+    m_marks.remove(unmark);
+    m_marks.add(mark);
+    if (recordUndo && !done.isEmpty())
+        pushUndo({UndoStep::Renames, done.size() == 1 ? QStringLiteral("rename %1").arg(baseName(done.first().first))
+                                                      : plural(int(done.size()), "rename"),
+                  done});
+    m_currentModel->reload();
+    if (!errors.isEmpty()) {
+        error(errors.first() + (errors.size() > 1 ? QStringLiteral(" (+%1 more)").arg(errors.size() - 1) : QString()));
+        return false;
+    }
+    if (recordUndo)
+        message(QStringLiteral("renamed %1").arg(plural(int(done.size()), "item")), StatusBar::Level::Success);
+    return true;
+}
+
+namespace {
+QStringList bulkRenameLines(const QStringList &paths, const QString &cwd) {
+    QStringList lines;
+    for (const QString &p : paths)
+        lines << (parentDir(p) == cwd ? baseName(p) : p);
+    return lines;
+}
+} // namespace
+
+void MainWindow::bulkRename() {
+    QStringList paths;
+    if (m_marks.isEmpty()) {
+        for (int r = 0; r < m_currentModel->rowCount(); ++r)
+            paths << m_currentModel->entry(r)->path;
+    } else {
+        // Marks in this folder keep their on-screen order; the rest follow.
+        QStringList rest = m_marks.paths();
+        for (int r = 0; r < m_currentModel->rowCount(); ++r) {
+            const QString &p = m_currentModel->entry(r)->path;
+            if (rest.removeOne(p))
+                paths << p;
+        }
+        std::sort(rest.begin(), rest.end(), [](const QString &a, const QString &b) { return naturalCompare(a, b) < 0; });
+        paths << rest;
+    }
+    if (paths.isEmpty())
+        return;
+    startBulkRename(paths);
+}
+
+QString MainWindow::editorCommand() const {
+    for (const QString &candidate : {m_editor, qEnvironmentVariable("VISUAL"), qEnvironmentVariable("EDITOR")})
+        if (!candidate.trimmed().isEmpty())
+            return candidate.trimmed();
+    for (const char *fallback : {"nvim", "vim", "vi", "nano"})
+        if (!QStandardPaths::findExecutable(QLatin1String(fallback)).isEmpty())
+            return QLatin1String(fallback);
+    return QStringLiteral("vi");
+}
+
+void MainWindow::startBulkRename(const QStringList &paths) {
+    for (const QString &p : paths) {
+        if (p.contains(u'\n')) {
+            error(QStringLiteral("can't bulk rename names with line breaks: %1").arg(baseName(p)));
+            return;
+        }
+    }
+    m_renamePoll.stop();
+    m_renamePoll.disconnect();
+    m_renameDir = std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/scout-rename-XXXXXX"));
+    if (!m_renameDir->isValid()) {
+        error(QStringLiteral("could not create a temporary folder"));
+        m_renameDir.reset();
+        return;
+    }
+    const QString file = m_renameDir->filePath(QStringLiteral("names.txt"));
+    const QString done = m_renameDir->filePath(QStringLiteral("done"));
+    {
+        QFile f(file);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            error(QStringLiteral("could not write %1").arg(file));
+            return;
+        }
+        f.write(bulkRenameLines(paths, m_cwd).join(u'\n').toUtf8() + '\n');
+    }
+    m_renamePaths = paths;
+
+    // The editor runs inside sh so `set editor code --wait` style commands work,
+    // and it reports through a file because terminals may hand the command to
+    // an already running instance and exit right away.
+    const QString editor = editorCommand();
+    const QString script = editor + QStringLiteral(" \"$1\"; printf '%s' \"$?\" > \"$2\"");
+    static const QStringList guiEditors = {
+        QStringLiteral("code"),  QStringLiteral("codium"), QStringLiteral("cursor"), QStringLiteral("subl"),
+        QStringLiteral("zed"),   QStringLiteral("zeditor"), QStringLiteral("gedit"), QStringLiteral("gnome-text-editor"),
+        QStringLiteral("kate"),  QStringLiteral("kwrite"), QStringLiteral("mousepad"), QStringLiteral("gvim"),
+        QStringLiteral("neovide")};
+    QStringList argv{QStringLiteral("sh"), QStringLiteral("-c"), script, QStringLiteral("sh"), file, done};
+    if (!guiEditors.contains(QFileInfo(CommandRegistry::split(editor).value(0)).fileName())) {
+        const QString term = terminalProgram();
+        if (term.isEmpty()) {
+            error(QStringLiteral("no terminal found for %1; set $TERMINAL").arg(editor));
+            return;
+        }
+        argv = QStringList{term} + terminalExecArgs(term) + argv;
+    }
+    if (!QProcess::startDetached(argv.first(), argv.mid(1), m_cwd)) {
+        error(QStringLiteral("could not start %1").arg(argv.first()));
+        return;
+    }
+    connect(&m_renamePoll, &QTimer::timeout, this, [this, file, done] {
+        if (!QFile::exists(done))
+            return;
+        m_renamePoll.stop();
+        QFile status(done);
+        const QByteArray code = status.open(QIODevice::ReadOnly) ? status.readAll().trimmed() : QByteArray("?");
+        QStringList lines;
+        QFile names(file);
+        if (names.open(QIODevice::ReadOnly | QIODevice::Text))
+            lines = QString::fromUtf8(names.readAll()).split(u'\n');
+        const QStringList paths = m_renamePaths;
+        m_renameDir.reset();
+        m_renamePaths.clear();
+        if (code != "0") {
+            error(QStringLiteral("the editor exited with status %1; nothing renamed").arg(QString::fromLatin1(code)));
+            return;
+        }
+        finishBulkRename(paths, lines);
+    });
+    m_renamePoll.start();
+    message(QStringLiteral("editing %1 in %2; save and quit to rename").arg(plural(int(paths.size()), "name"), editor));
+}
+
+void MainWindow::bulkRenameWith(const std::function<QStringList(const QStringList &)> &edit) {
+    QStringList paths;
+    for (int r = 0; r < m_currentModel->rowCount(); ++r)
+        paths << m_currentModel->entry(r)->path;
+    if (!m_marks.isEmpty())
+        paths = m_marks.paths();
+    finishBulkRename(paths, edit(bulkRenameLines(paths, m_cwd)));
+}
+
+void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &rawLines) {
+    QStringList lines = rawLines;
+    while (!lines.isEmpty() && lines.last().isEmpty())
+        lines.removeLast();
+    for (QString &l : lines)
+        if (l.endsWith(u'\r'))
+            l.chop(1);
+    if (lines.size() != paths.size()) {
+        error(QStringLiteral("expected %1 lines but got %2; nothing renamed").arg(paths.size()).arg(lines.size()));
+        return;
+    }
+    QList<QPair<QString, QString>> renames;
+    for (int i = 0; i < paths.size(); ++i) {
+        const QString &from = paths[i];
+        const QString &line = lines[i];
+        if (line.isEmpty() || line == QLatin1String(".") || line == QLatin1String("..")) {
+            error(QStringLiteral("line %1 is not a usable name; nothing renamed").arg(i + 1));
+            return;
+        }
+        QString to;
+        if (parentDir(from) == m_cwd) {
+            if (line.contains(u'/')) {
+                error(QStringLiteral("line %1: names can't contain /; nothing renamed").arg(i + 1));
+                return;
+            }
+            to = QDir(m_cwd).filePath(line);
+        } else {
+            to = QDir::cleanPath(line);
+            if (parentDir(to) != parentDir(from)) {
+                error(QStringLiteral("line %1: bulk rename can't move items between folders").arg(i + 1));
+                return;
+            }
+        }
+        if (to != from)
+            renames.append({from, to});
+    }
+    if (renames.isEmpty()) {
+        message(QStringLiteral("no names changed"));
+        return;
+    }
+    QList<PickerItem> items;
+    for (const auto &[from, to] : renames) {
+        PickerItem item;
+        item.text = QStringLiteral("%1  →  %2").arg(baseName(from), baseName(to));
+        if (parentDir(from) != m_cwd)
+            item.description = tilde(parentDir(from));
+        items << item;
+    }
+    PromptSpec spec;
+    spec.label = QStringLiteral("rename %1? [y/N]").arg(plural(int(renames.size()), "item"));
+    spec.showList = true;
+    spec.onChange = [this, renames, items](const QString &text) {
+        if (text.isEmpty()) {
+            m_picker->setItems(items);
+            m_picker->setHeader(QStringLiteral("bulk rename"));
+            m_picker->setFooter(QStringLiteral("y rename · anything else cancels"));
+            positionOverlays();
+            return;
+        }
+        m_prompt->close(true);
+        if (text == QLatin1String("y") || text == QLatin1String("Y"))
+            applyRenames(renames);
+        else
+            message(QStringLiteral("bulk rename cancelled"));
+    };
+    spec.onAccept = [this](const QString &, const PickerItem *) { message(QStringLiteral("bulk rename cancelled")); };
+    openPrompt(spec);
+}
+
+// File chooser
+
+void MainWindow::setChooser(const ChooserRequest &request, std::function<void(const ChooserResult &)> done) {
+    m_chooser = request;
+    m_chooserDone = std::move(done);
+    m_chooserBar = new ChooserBar(request, this);
+    static_cast<QVBoxLayout *>(layout())->insertWidget(2, m_chooserBar);
+    connect(m_chooserBar, &ChooserBar::acceptClicked, this, [this] { chooserAccept(false); });
+    connect(m_chooserBar, &ChooserBar::cancelClicked, this, [this] { finishChooser(false); });
+    auto applyFilter = [this](int index) {
+        if (m_chooser.directory) {
+            m_currentModel->setFileFilter([](const FileEntry &) { return false; });
+        } else if (index >= 0 && index < m_chooser.filters.size()) {
+            const FileFilter filter = m_chooser.filters[index];
+            m_currentModel->setFileFilter([filter](const FileEntry &e) { return filter.accepts(e); });
+        }
+    };
+    connect(m_chooserBar, &ChooserBar::filterChanged, this, applyFilter);
+    applyFilter(m_chooserBar->filterIndex());
+
+    QString title = request.title;
+    if (title.isEmpty())
+        title = request.mode == ChooserRequest::Mode::Open
+                    ? (request.directory ? QStringLiteral("Select Folder") : QStringLiteral("Open File"))
+                    : QStringLiteral("Save File");
+    setWindowTitle(title);
+
+    m_keys.bind(QStringLiteral("<C-CR>"), QStringLiteral("choose"), QStringLiteral("File chooser: accept"));
+    m_keys.bind(QStringLiteral("<A-f>"), QStringLiteral("choose-filter"), QStringLiteral("File chooser: next file type"));
+
+    QString start = request.currentFolder;
+    QString select;
+    if (!request.currentFile.isEmpty()) {
+        start = parentDir(request.currentFile);
+        select = baseName(request.currentFile);
+    }
+    if (!start.isEmpty() && QFileInfo(start).isDir())
+        cd(start, select, false);
+    if (QLineEdit *edit = m_chooserBar->nameEdit()) {
+        edit->installEventFilter(this);
+        m_chooserBar->setName(!request.currentName.isEmpty() ? request.currentName : baseName(request.currentFile));
+        QTimer::singleShot(0, edit, [edit] { edit->setFocus(Qt::OtherFocusReason); });
+    }
+    applyTheme();
+    updateChooserHint();
+}
+
+void MainWindow::updateChooserHint() {
+    if (!m_chooserBar)
+        return;
+    QString accept = m_chooser.acceptLabel;
+    accept.remove(QRegularExpression(QStringLiteral("_(?!_)")));
+    QString hint;
+    switch (m_chooser.mode) {
+    case ChooserRequest::Mode::Open:
+        if (m_chooser.directory) {
+            if (accept.isEmpty())
+                accept = QStringLiteral("Select");
+            accept += QStringLiteral(" “%1”").arg(m_cwd == QDir::homePath() ? QStringLiteral("~") : baseName(m_cwd).isEmpty() ? QStringLiteral("/") : baseName(m_cwd));
+            hint = QStringLiteral("l open folder · Ctrl-Enter select this folder · Esc cancel");
+        } else {
+            if (accept.isEmpty())
+                accept = QStringLiteral("Open");
+            hint = m_chooser.multiple ? QStringLiteral("Enter choose · Space mark several · Ctrl-Enter choose marked · Esc cancel")
+                                      : QStringLiteral("Enter choose · Esc cancel");
+        }
+        break;
+    case ChooserRequest::Mode::Save:
+        if (accept.isEmpty())
+            accept = QStringLiteral("Save");
+        hint = QStringLiteral("Tab name ⇄ folders · Enter save · Esc cancel");
+        break;
+    case ChooserRequest::Mode::SaveFiles:
+        if (accept.isEmpty())
+            accept = QStringLiteral("Save here");
+        hint = QStringLiteral("l open folder · Ctrl-Enter save %1 here · Esc cancel").arg(plural(int(m_chooser.files.size()), "file"));
+        break;
+    }
+    if (!m_chooser.filters.isEmpty())
+        hint += QStringLiteral(" · Alt-f file type");
+    m_chooserBar->setHint(hint);
+    m_chooserBar->setAcceptText(accept);
+}
+
+void MainWindow::chooserAccept(bool fromCursor) {
+    const FileEntry *e = currentEntry();
+    switch (m_chooser.mode) {
+    case ChooserRequest::Mode::Open: {
+        QStringList paths;
+        if (m_chooser.multiple && !m_marks.isEmpty()) {
+            for (const QString &p : m_marks.paths())
+                if (QFileInfo(p).isDir() == m_chooser.directory)
+                    paths << p;
+        } else if (m_chooser.directory) {
+            paths << m_cwd;
+        } else if (e && !e->isDir) {
+            paths << e->path;
+        }
+        if (paths.isEmpty()) {
+            error(m_chooser.directory ? QStringLiteral("mark folders to choose them") : QStringLiteral("pick a file"));
+            return;
+        }
+        chooserAcceptPaths(paths);
+        break;
+    }
+    case ChooserRequest::Mode::Save:
+        if (fromCursor && e && !e->isDir) {
+            m_chooserBar->setName(e->name);
+            m_chooserBar->nameEdit()->setFocus(Qt::OtherFocusReason);
+            return;
+        }
+        chooserSave(m_chooserBar->name());
+        break;
+    case ChooserRequest::Mode::SaveFiles: {
+        QStringList paths;
+        QSet<QString> taken;
+        for (const QString &name : m_chooser.files) {
+            QString dest = uniqueDestination(m_cwd, baseName(name));
+            // Two files with the same name must not get the same destination.
+            for (int i = 2; taken.contains(dest) && i < 1000; ++i)
+                dest = uniqueDestination(m_cwd, QStringLiteral("%1 (%2)").arg(baseName(name)).arg(i));
+            taken.insert(dest);
+            paths << dest;
+        }
+        chooserAcceptPaths(paths);
+        break;
+    }
+    }
+}
+
+void MainWindow::chooserSave(const QString &input) {
+    const QString name = expandHome(input.trimmed());
+    if (name.isEmpty()) {
+        error(QStringLiteral("type a file name"));
+        m_chooserBar->nameEdit()->setFocus(Qt::OtherFocusReason);
+        return;
+    }
+    const QString path = QDir::cleanPath(QDir(m_cwd).filePath(name));
+    const QFileInfo info(path);
+    if (info.isDir()) {
+        cd(path);
+        m_chooserBar->setName(m_chooser.currentName);
+        return;
+    }
+    if (!QFileInfo(parentDir(path)).isDir()) {
+        error(QStringLiteral("no such folder: %1").arg(tilde(parentDir(path))));
+        return;
+    }
+    if (!info.exists() && !info.isSymLink()) {
+        chooserAcceptPaths({path});
+        return;
+    }
+    PromptSpec spec;
+    spec.label = QStringLiteral("replace %1? [y/N]").arg(baseName(path));
+    spec.onChange = [this, path](const QString &text) {
+        if (text.isEmpty())
+            return;
+        m_prompt->close(true);
+        if (text == QLatin1String("y") || text == QLatin1String("Y"))
+            chooserAcceptPaths({path});
+        else if (m_chooserBar)
+            m_chooserBar->nameEdit()->setFocus(Qt::OtherFocusReason);
+    };
+    openPrompt(spec);
+}
+
+void MainWindow::chooserAcceptPaths(const QStringList &paths) {
+    if (!m_chooserDone)
+        return;
+    ChooserResult result;
+    result.accepted = true;
+    result.paths = paths;
+    result.filter = m_chooserBar->filterIndex();
+    result.choices = m_chooserBar->choices();
+    auto done = std::exchange(m_chooserDone, {});
+    done(result);
+    QTimer::singleShot(0, this, &QWidget::close);
+}
+
+void MainWindow::finishChooser(bool accepted) {
+    if (accepted) {
+        chooserAccept(false);
+        return;
+    }
+    if (!m_chooserDone)
+        return;
+    ChooserResult result;
+    result.filter = m_chooserBar ? m_chooserBar->filterIndex() : -1;
+    auto done = std::exchange(m_chooserDone, {});
+    done(result);
+    if (isVisible())
+        QTimer::singleShot(0, this, &QWidget::close);
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    if (m_chooserDone) {
+        ChooserResult result;
+        auto done = std::exchange(m_chooserDone, {});
+        done(result);
+    }
+    QWidget::closeEvent(event);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (m_chooserBar && watched == m_chooserBar->nameEdit() && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        switch (key->key()) {
+        case Qt::Key_Tab:
+        case Qt::Key_Backtab:
+            setFocus(Qt::TabFocusReason);
+            return true;
+        case Qt::Key_Escape:
+            finishChooser(false);
+            return true;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            chooserSave(m_chooserBar->name());
+            return true;
+        case Qt::Key_Up:
+            moveCursor(-1);
+            return true;
+        case Qt::Key_Down:
+            moveCursor(1);
+            return true;
+        default:
+            break;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
