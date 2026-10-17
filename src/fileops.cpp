@@ -335,7 +335,7 @@ public:
                 return false;
             }
             noteCreated(dst);
-            noteCopied(st);
+            noteCopied(src, st);
             return true;
         }
         if (S_ISDIR(st.st_mode)) {
@@ -356,14 +356,14 @@ public:
                 chmod(d.constData(), st.st_mode & 07777);
                 const struct timespec times[2] = {st.st_atim, st.st_mtim};
                 utimensat(AT_FDCWD, d.constData(), times, 0);
-                noteCopied(st);
+                noteCopied(src, st);
             }
             return ok;
         }
         if (S_ISREG(st.st_mode)) {
             if (!copyFile(src, dst, st))
                 return false;
-            noteCopied(st);
+            noteCopied(src, st);
             return true;
         }
         error(src, QStringLiteral("unsupported file type"));
@@ -390,7 +390,7 @@ public:
             error(display, errnoString());
             return false;
         }
-        if (onlyCopied && !wasCopied(st)) {
+        if (onlyCopied && !wasCopied(display, parentFd, name, st)) {
             error(display, QStringLiteral("changed during the move, so it was left in place"));
             return false;
         }
@@ -482,8 +482,13 @@ public:
     }
 
 private:
-    using FileKey = QPair<quint64, quint64>;
+    // What a source entry looked like when it was copied. Keyed by path, so
+    // hard links are judged name by name, and carrying the birth time, since
+    // a deleted and recreated entry can get the same inode number at once.
     struct Snapshot {
+        quint64 dev;
+        quint64 ino;
+        qint64 born;
         qint64 mtimeNs;
         qint64 size;
     };
@@ -502,19 +507,31 @@ private:
 
     static qint64 mtimeNs(const struct stat &st) { return qint64(st.st_mtim.tv_sec) * 1000000000 + st.st_mtim.tv_nsec; }
 
-    void noteCopied(const struct stat &st) {
-        m_copied.insert({quint64(st.st_dev), quint64(st.st_ino)}, {mtimeNs(st), qint64(st.st_size)});
+    // Birth time, or the change time where the filesystem has none; -1 if unknown.
+    static qint64 bornNs(int dirFd, const char *path) {
+        struct statx sx {};
+        if (statx(dirFd, path, AT_SYMLINK_NOFOLLOW, STATX_BTIME | STATX_CTIME, &sx) != 0)
+            return -1;
+        const statx_timestamp t = (sx.stx_mask & STATX_BTIME) ? sx.stx_btime : sx.stx_ctime;
+        return qint64(t.tv_sec) * 1000000000 + t.tv_nsec;
+    }
+
+    void noteCopied(const QString &path, const struct stat &st) {
+        m_copied.insert(QDir::cleanPath(path), {quint64(st.st_dev), quint64(st.st_ino),
+                                                bornNs(AT_FDCWD, QFile::encodeName(path).constData()), mtimeNs(st),
+                                                qint64(st.st_size)});
     }
 
     // Folders change mtime as entries come and go; their contents are checked one by one instead.
-    bool wasCopied(const struct stat &st) const {
-        const auto it = m_copied.constFind({quint64(st.st_dev), quint64(st.st_ino)});
-        if (it == m_copied.constEnd())
+    bool wasCopied(const QString &path, int parentFd, const QByteArray &name, const struct stat &st) const {
+        const auto it = m_copied.constFind(QDir::cleanPath(path));
+        if (it == m_copied.constEnd() || it->dev != quint64(st.st_dev) || it->ino != quint64(st.st_ino) ||
+            it->born < 0 || it->born != bornNs(parentFd, name.constData()))
             return false;
         return S_ISDIR(st.st_mode) || (it->mtimeNs == mtimeNs(st) && it->size == qint64(st.st_size));
     }
 
-    QHash<FileKey, Snapshot> m_copied;
+    QHash<QString, Snapshot> m_copied;
     std::function<void(const std::function<void(Task::Progress &)> &)> m_update;
     std::function<bool()> m_cancelled;
     QString m_claimTarget;

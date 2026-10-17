@@ -780,6 +780,7 @@ private slots:
         const QByteArray chunk(4 << 20, 'x');
         for (int i = 0; i < 32; ++i)
             writeFile(other.path() + QStringLiteral("/pkg/f%1.bin").arg(i), chunk);
+        QVERIFY(QDir().mkpath(other.path() + QStringLiteral("/pkg/dir")));
         const QString base = makeTree();
         TaskManager tasks;
         QSignalSpy finished(&tasks, &TaskManager::taskFinished);
@@ -793,6 +794,9 @@ private slots:
                                             .entryList({QStringLiteral(".pkg.scout-partial-*")}, QDir::AllEntries | QDir::Hidden);
             if (!staging.isEmpty()) {
                 writeFile(other.path() + QStringLiteral("/pkg/late.txt"), "late\n");
+                // A folder replaced by a new one, which may reuse the old inode number.
+                QVERIFY(QDir().rmdir(other.path() + QStringLiteral("/pkg/dir")));
+                writeFile(other.path() + QStringLiteral("/pkg/dir/marker"), "new\n");
                 added = true;
             }
             QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
@@ -801,6 +805,8 @@ private slots:
             QSKIP("the copy finished before the test could add a file");
         QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 20000);
         QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/late.txt")));
+        QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/dir/marker")) ||
+                QFile::exists(base + QStringLiteral("/beta/pkg/dir/marker")));
         QVERIFY(!QFile::exists(other.path() + QStringLiteral("/pkg/f0.bin")));
         QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/f31.bin")));
     }
@@ -839,14 +845,47 @@ private slots:
         w.bulkRenameWith([](const QStringList &lines) { return lines; });
         QVERIFY(!w.prompt()->isOpen());
         QVERIFY(QFile::exists(base + QStringLiteral("/odd\r")));
-        // CRLF from the editor is still understood for ordinary names.
+        // An editor that writes CRLF adds a \r to every line, odd\r included.
         w.bulkRenameWith([](const QStringList &lines) {
             QStringList out;
             for (const QString &l : lines)
-                out << (l.endsWith(u'\r') ? l : l + u'\r');
+                out << l + u'\r';
             return out;
         });
         QVERIFY(!w.prompt()->isOpen());
+        // ...and an edited name loses only the editor's \r.
+        w.bulkRenameWith([](const QStringList &lines) {
+            QStringList out;
+            for (const QString &l : lines)
+                out << (l == QLatin1String("notes.md") ? QStringLiteral("notes2.md") : l) + u'\r';
+            return out;
+        });
+        QVERIFY(w.prompt()->isOpen());
+        QCOMPARE(w.picker()->items().size(), 1);
+        keys(w, QStringLiteral("y"));
+        QTRY_VERIFY(QFile::exists(base + QStringLiteral("/notes2.md")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/odd\r")));
+    }
+
+    void crossDeviceMoveJudgesHardLinksByName() {
+        struct stat shm {}, root {};
+        if (stat("/dev/shm", &shm) != 0 || stat(QFile::encodeName(m_root.path()).constData(), &root) != 0 ||
+            shm.st_dev == root.st_dev || access("/dev/shm", W_OK) != 0)
+            QSKIP("needs /dev/shm on a separate, writable filesystem");
+        // Two names for one file both go, and land as two copies.
+        QTemporaryDir other(QStringLiteral("/dev/shm/scout-test-XXXXXX"));
+        writeFile(other.path() + QStringLiteral("/pkg/a"), "same\n");
+        QVERIFY(link(QFile::encodeName(other.path() + QStringLiteral("/pkg/a")).constData(),
+                     QFile::encodeName(other.path() + QStringLiteral("/pkg/b")).constData()) == 0);
+        const QString base = makeTree();
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        Task *t = tasks.start(Task::Move, {other.path() + QStringLiteral("/pkg")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(finished.size(), 1);
+        QCOMPARE(t->progress().state, Task::Done);
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/a")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/b")));
+        QVERIFY(!QFileInfo::exists(other.path() + QStringLiteral("/pkg")));
     }
 
     void chooserOpenSaveAndFolders() {

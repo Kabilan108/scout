@@ -2297,10 +2297,17 @@ void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &r
     QStringList lines = rawLines;
     while (!lines.isEmpty() && lines.last().isEmpty())
         lines.removeLast();
-    // Editors set to CRLF add a \r, but on Linux it can also be part of a name.
-    for (int i = 0; i < lines.size(); ++i)
-        if (lines[i].endsWith(u'\r') && !originals.value(i).endsWith(u'\r'))
+    // An editor set to CRLF adds a \r to every line, but on Linux a \r can
+    // also end a real name.
+    const bool crlf = !lines.isEmpty() && std::all_of(lines.begin(), lines.end(), [](const QString &l) { return l.endsWith(u'\r'); });
+    for (int i = 0; i < lines.size(); ++i) {
+        if (lines[i] == originals.value(i))
+            continue;
+        if (lines[i] == originals.value(i) + u'\r')
+            lines[i] = originals.value(i);
+        else if (crlf)
             lines[i].chop(1);
+    }
     if (lines.size() != paths.size()) {
         error(QStringLiteral("expected %1 lines but got %2; nothing renamed").arg(paths.size()).arg(lines.size()));
         return;
