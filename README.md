@@ -167,7 +167,8 @@ xdg.portal = {
     "org.freedesktop.impl.portal.FileChooser" = [ "scout" "gnome" "gtk" ];
   };
 };
-home.packages = [ scout ];
+# Nautilus ships a FileManager1 service file too; priority lets scout's win.
+home.packages = [ (lib.hiPrio scout) ];
 xdg.mimeApps.defaultApplications."inode/directory" = "scout.desktop";
 ```
 
@@ -176,9 +177,9 @@ Flatpaks do by default. GTK 3 apps need `GTK_USE_PORTAL=1`, GTK 4 apps
 `GDK_DEBUG=portals`, Firefox `widget.use-xdg-desktop-portal.file-picker = 1`,
 and Qt apps `QT_QPA_PLATFORMTHEME=xdgdesktopportal`.
 
-If Nautilus is installed, it also ships an `org.freedesktop.FileManager1`
-service file. To make sure scout wins, add a copy of scout's to
-`~/.local/share/dbus-1/services/`, which D-Bus searches first.
+New D-Bus service files take effect after logging out and back in (or
+`busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig`),
+and the portal routing after `systemctl --user restart xdg-desktop-portal`.
 
 Without NixOS, make scout the default folder handler with
 `xdg-mime default scout.desktop inode/directory`.

@@ -110,8 +110,8 @@ ChooserRequest service::requestFromOptions(ChooserRequest::Mode mode, const QStr
     r.filters = demarshal<QList<FileFilter>>(options.value(QStringLiteral("filters")));
     if (options.contains(QStringLiteral("current_filter"))) {
         const FileFilter current = demarshal<FileFilter>(options.value(QStringLiteral("current_filter")));
-        for (int i = 0; i < r.filters.size(); ++i)
-            if (r.filters[i].name == current.name)
+        for (int i = 0; i < r.filters.size() && r.currentFilter < 0; ++i)
+            if (r.filters[i].name == current.name && r.filters[i].rules == current.rules)
                 r.currentFilter = i;
         if (r.currentFilter < 0 && r.filters.isEmpty() && !current.rules.isEmpty()) {
             r.filters << current;

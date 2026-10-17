@@ -31,7 +31,9 @@
 #include <cstring>
 #include <grp.h>
 #include <pwd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 namespace {
 
@@ -91,6 +93,15 @@ qint64 treeSize(const QString &path) {
 }
 
 } // namespace
+
+FileStamp fileStamp(const QString &path) {
+    struct statx sx {};
+    if (statx(AT_FDCWD, QFile::encodeName(path).constData(), AT_SYMLINK_NOFOLLOW, STATX_INO | STATX_BTIME | STATX_CTIME, &sx) != 0)
+        return {};
+    // Filesystems without birth times fall back to the change time.
+    const statx_timestamp t = (sx.stx_mask & STATX_BTIME) ? sx.stx_btime : sx.stx_ctime;
+    return {makedev(sx.stx_dev_major, sx.stx_dev_minor), sx.stx_ino, qint64(t.tv_sec) * 1000000000 + t.tv_nsec};
+}
 
 MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *parent)
     : QWidget(parent), m_loadUserConfig(loadUserConfig) {
@@ -2033,6 +2044,9 @@ void MainWindow::updateTabs() {
 // Undo
 
 void MainWindow::pushUndo(UndoStep step) {
+    step.ids.clear();
+    for (const auto &[original, now] : step.pairs)
+        step.ids << fileStamp(now);
     m_undo.append(std::move(step));
     while (m_undo.size() > 100)
         m_undo.removeFirst();
@@ -2045,10 +2059,23 @@ void MainWindow::undo() {
     }
     const UndoStep step = m_undo.takeLast();
     QList<QPair<QString, QString>> back;
-    QStringList current;
-    for (const auto &[original, now] : step.pairs) {
-        back.append({now, original});
-        current << now;
+    QStringList current, replaced;
+    for (int i = 0; i < step.pairs.size(); ++i) {
+        const auto &[original, now] = step.pairs[i];
+        const FileStamp stamp = fileStamp(now);
+        if (!stamp.exists())
+            replaced << QStringLiteral("%1 (gone)").arg(baseName(now));
+        else if (stamp != step.ids.value(i))
+            replaced << QStringLiteral("%1 (replaced)").arg(baseName(now));
+        else {
+            back.append({now, original});
+            current << now;
+        }
+    }
+    if (!replaced.isEmpty()) {
+        error(QStringLiteral("can't undo %1: %2 changed since").arg(step.description, replaced.join(QStringLiteral(", "))));
+        if (current.isEmpty())
+            return;
     }
     switch (step.kind) {
     case UndoStep::Moves:
@@ -2232,7 +2259,8 @@ void MainWindow::startBulkRename(const QStringList &paths) {
         error(QStringLiteral("could not start %1").arg(argv.first()));
         return;
     }
-    connect(&m_renamePoll, &QTimer::timeout, this, [this, file, done] {
+    const QString baseDir = m_cwd;
+    connect(&m_renamePoll, &QTimer::timeout, this, [this, file, done, baseDir] {
         if (!QFile::exists(done))
             return;
         m_renamePoll.stop();
@@ -2249,7 +2277,7 @@ void MainWindow::startBulkRename(const QStringList &paths) {
             error(QStringLiteral("the editor exited with status %1; nothing renamed").arg(QString::fromLatin1(code)));
             return;
         }
-        finishBulkRename(paths, lines);
+        finishBulkRename(paths, lines, baseDir);
     });
     m_renamePoll.start();
     message(QStringLiteral("editing %1 in %2; save and quit to rename").arg(plural(int(paths.size()), "name"), editor));
@@ -2261,16 +2289,18 @@ void MainWindow::bulkRenameWith(const std::function<QStringList(const QStringLis
         paths << m_currentModel->entry(r)->path;
     if (!m_marks.isEmpty())
         paths = m_marks.paths();
-    finishBulkRename(paths, edit(bulkRenameLines(paths, m_cwd)));
+    finishBulkRename(paths, edit(bulkRenameLines(paths, m_cwd)), m_cwd);
 }
 
-void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &rawLines) {
+void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &rawLines, const QString &baseDir) {
+    const QStringList originals = bulkRenameLines(paths, baseDir);
     QStringList lines = rawLines;
     while (!lines.isEmpty() && lines.last().isEmpty())
         lines.removeLast();
-    for (QString &l : lines)
-        if (l.endsWith(u'\r'))
-            l.chop(1);
+    // Editors set to CRLF add a \r, but on Linux it can also be part of a name.
+    for (int i = 0; i < lines.size(); ++i)
+        if (lines[i].endsWith(u'\r') && !originals.value(i).endsWith(u'\r'))
+            lines[i].chop(1);
     if (lines.size() != paths.size()) {
         error(QStringLiteral("expected %1 lines but got %2; nothing renamed").arg(paths.size()).arg(lines.size()));
         return;
@@ -2284,12 +2314,12 @@ void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &r
             return;
         }
         QString to;
-        if (parentDir(from) == m_cwd) {
+        if (parentDir(from) == baseDir) {
             if (line.contains(u'/')) {
                 error(QStringLiteral("line %1: names can't contain /; nothing renamed").arg(i + 1));
                 return;
             }
-            to = QDir(m_cwd).filePath(line);
+            to = QDir(baseDir).filePath(line);
         } else {
             to = QDir::cleanPath(line);
             if (parentDir(to) != parentDir(from)) {

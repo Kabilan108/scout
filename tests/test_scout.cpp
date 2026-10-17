@@ -11,6 +11,7 @@
 
 #include <QDBusArgument>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QMimeData>
 #include <QSignalSpy>
@@ -20,6 +21,7 @@
 
 #include <cerrno>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 namespace {
@@ -765,6 +767,88 @@ private slots:
         qunsetenv("TERMINAL");
     }
 
+    void crossDeviceMoveKeepsLateArrivals() {
+        struct stat shm {}, root {};
+        if (stat("/dev/shm", &shm) != 0 || stat(QFile::encodeName(m_root.path()).constData(), &root) != 0 ||
+            shm.st_dev == root.st_dev || access("/dev/shm", W_OK) != 0)
+            QSKIP("needs /dev/shm on a separate, writable filesystem");
+        struct statvfs vfs {};
+        if (statvfs("/dev/shm", &vfs) != 0 || quint64(vfs.f_bavail) * vfs.f_frsize < (256ull << 20))
+            QSKIP("needs 256 MiB free in /dev/shm");
+        QTemporaryDir other(QStringLiteral("/dev/shm/scout-test-XXXXXX"));
+        QVERIFY(other.isValid());
+        const QByteArray chunk(4 << 20, 'x');
+        for (int i = 0; i < 32; ++i)
+            writeFile(other.path() + QStringLiteral("/pkg/f%1.bin").arg(i), chunk);
+        const QString base = makeTree();
+        TaskManager tasks;
+        QSignalSpy finished(&tasks, &TaskManager::taskFinished);
+        tasks.start(Task::Move, {other.path() + QStringLiteral("/pkg")}, base + QStringLiteral("/beta"));
+        // Add a file to the source while the copy is under way.
+        bool added = false;
+        QElapsedTimer clock;
+        clock.start();
+        while (!added && finished.isEmpty() && clock.elapsed() < 10000) {
+            const QStringList staging = QDir(base + QStringLiteral("/beta"))
+                                            .entryList({QStringLiteral(".pkg.scout-partial-*")}, QDir::AllEntries | QDir::Hidden);
+            if (!staging.isEmpty()) {
+                writeFile(other.path() + QStringLiteral("/pkg/late.txt"), "late\n");
+                added = true;
+            }
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+        }
+        if (!added)
+            QSKIP("the copy finished before the test could add a file");
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 20000);
+        QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/late.txt")));
+        QVERIFY(!QFile::exists(other.path() + QStringLiteral("/pkg/f0.bin")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/f31.bin")));
+    }
+
+    void undoLeavesReplacedFilesAlone() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.tasks()->start(Task::Copy, {base + QStringLiteral("/notes.md")}, base + QStringLiteral("/beta"));
+        QTRY_COMPARE(w.undoDepth(), 1);
+        QVERIFY(QFile::remove(base + QStringLiteral("/beta/notes.md")));
+        writeFile(base + QStringLiteral("/beta/notes.md"), "someone else's file\n");
+        w.runCommandLine(QStringLiteral("undo"));
+        QVERIFY(w.statusBar()->message().contains(QStringLiteral("replaced")));
+        QCOMPARE(w.tasks()->activeCount(), 0);
+        QVERIFY(QFile::exists(base + QStringLiteral("/beta/notes.md")));
+
+        // A renamed file that was renamed again by someone else stays put.
+        w.cd(base + QStringLiteral("/file2.txt"));
+        QTRY_COMPARE(currentName(w), QStringLiteral("file2.txt"));
+        w.runCommandLine(QStringLiteral("rename two.txt"));
+        QVERIFY(QFile::rename(base + QStringLiteral("/two.txt"), base + QStringLiteral("/elsewhere.txt")));
+        writeFile(base + QStringLiteral("/two.txt"), "new\n");
+        w.runCommandLine(QStringLiteral("undo"));
+        QVERIFY(!QFile::exists(base + QStringLiteral("/file2.txt")));
+        QVERIFY(QFile::exists(base + QStringLiteral("/two.txt")));
+    }
+
+    void bulkRenameKeepsCarriageReturnNames() {
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/odd\r"), "odd");
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.bulkRenameWith([](const QStringList &lines) { return lines; });
+        QVERIFY(!w.prompt()->isOpen());
+        QVERIFY(QFile::exists(base + QStringLiteral("/odd\r")));
+        // CRLF from the editor is still understood for ordinary names.
+        w.bulkRenameWith([](const QStringList &lines) {
+            QStringList out;
+            for (const QString &l : lines)
+                out << (l.endsWith(u'\r') ? l : l + u'\r');
+            return out;
+        });
+        QVERIFY(!w.prompt()->isOpen());
+    }
+
     void chooserOpenSaveAndFolders() {
         const QString base = makeTree();
         {
@@ -872,6 +956,14 @@ private slots:
         QCOMPARE(r.filters.size(), 2);
         QCOMPARE(r.currentFilter, 1);
         QCOMPARE(r.acceptLabel, QStringLiteral("_Upload"));
+
+        // Filters are identified by their whole definition, not just the label.
+        QVariantMap same;
+        const QList<FileFilter> twins = {FileFilter{QStringLiteral("Images"), {{0u, QStringLiteral("*.png")}}},
+                                         FileFilter{QStringLiteral("Images"), {{0u, QStringLiteral("*.jpg")}}}};
+        same.insert(QStringLiteral("filters"), QVariant::fromValue(twins));
+        same.insert(QStringLiteral("current_filter"), QVariant::fromValue(twins[0]));
+        QCOMPARE(service::requestFromOptions(ChooserRequest::Mode::Open, {}, same).currentFilter, 0);
 
         FileEntry png;
         png.name = QStringLiteral("cat.PNG");

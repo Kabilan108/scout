@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QRandomGenerator>
 #include <QThreadPool>
 
@@ -334,6 +335,7 @@ public:
                 return false;
             }
             noteCreated(dst);
+            noteCopied(st);
             return true;
         }
         if (S_ISDIR(st.st_mode)) {
@@ -354,11 +356,16 @@ public:
                 chmod(d.constData(), st.st_mode & 07777);
                 const struct timespec times[2] = {st.st_atim, st.st_mtim};
                 utimensat(AT_FDCWD, d.constData(), times, 0);
+                noteCopied(st);
             }
             return ok;
         }
-        if (S_ISREG(st.st_mode))
-            return copyFile(src, dst, st);
+        if (S_ISREG(st.st_mode)) {
+            if (!copyFile(src, dst, st))
+                return false;
+            noteCopied(st);
+            return true;
+        }
         error(src, QStringLiteral("unsupported file type"));
         return false;
     }
@@ -366,21 +373,25 @@ public:
     // Deletes through directory descriptors opened with O_NOFOLLOW, so a folder
     // swapped for a symlink mid-delete can't redirect us into another tree.
     bool removeTree(const QString &path, bool honorCancel = true) {
-        const QByteArray parent = QFile::encodeName(parentOf(path));
-        const int parentFd = open(parent.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (parentFd < 0) {
-            error(path, errnoString());
-            return false;
-        }
-        const bool ok = removeAt(parentFd, QFile::encodeName(baseName(path)), path, honorCancel);
-        close(parentFd);
+        return removeTree(path, honorCancel, false);
+    }
+
+    // The source half of a cross-device move: removes only what the copy
+    // took, unchanged since, so anything added or edited meanwhile survives.
+    bool removeCopiedSource(const QString &path) {
+        const bool ok = removeTree(path, false, true);
+        m_copied.clear();
         return ok;
     }
 
-    bool removeAt(int parentFd, const QByteArray &name, const QString &display, bool honorCancel) {
+    bool removeAt(int parentFd, const QByteArray &name, const QString &display, bool honorCancel, bool onlyCopied) {
         struct stat st {};
         if (fstatat(parentFd, name.constData(), &st, AT_SYMLINK_NOFOLLOW) != 0) {
             error(display, errnoString());
+            return false;
+        }
+        if (onlyCopied && !wasCopied(st)) {
+            error(display, QStringLiteral("changed during the move, so it was left in place"));
             return false;
         }
         if (!S_ISDIR(st.st_mode)) {
@@ -418,7 +429,7 @@ public:
                 closedir(dir);
                 return false;
             }
-            ok = removeAt(dirfd(dir), child, display + u'/' + QFile::decodeName(child), honorCancel) && ok;
+            ok = removeAt(dirfd(dir), child, display + u'/' + QFile::decodeName(child), honorCancel, onlyCopied) && ok;
         }
         closedir(dir);
         if (ok && unlinkat(parentFd, name.constData(), AT_REMOVEDIR) != 0) {
@@ -433,6 +444,7 @@ public:
     // With `exactName`, the copy lands under exactly that name or fails.
     QString copyIntoPlace(const QString &src, const QString &target, const QString &exactName = {}) {
         const QString name = exactName.isEmpty() ? baseName(src) : exactName;
+        m_copied.clear();
         const QString temp = uniqueDestination(
             target, QStringLiteral(".%1.scout-partial-%2").arg(name).arg(QRandomGenerator::global()->generate(), 8, 16, QLatin1Char('0')));
         if (temp.isEmpty()) {
@@ -470,6 +482,39 @@ public:
     }
 
 private:
+    using FileKey = QPair<quint64, quint64>;
+    struct Snapshot {
+        qint64 mtimeNs;
+        qint64 size;
+    };
+
+    bool removeTree(const QString &path, bool honorCancel, bool onlyCopied) {
+        const QByteArray parent = QFile::encodeName(parentOf(path));
+        const int parentFd = open(parent.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (parentFd < 0) {
+            error(path, errnoString());
+            return false;
+        }
+        const bool ok = removeAt(parentFd, QFile::encodeName(baseName(path)), path, honorCancel, onlyCopied);
+        close(parentFd);
+        return ok;
+    }
+
+    static qint64 mtimeNs(const struct stat &st) { return qint64(st.st_mtim.tv_sec) * 1000000000 + st.st_mtim.tv_nsec; }
+
+    void noteCopied(const struct stat &st) {
+        m_copied.insert({quint64(st.st_dev), quint64(st.st_ino)}, {mtimeNs(st), qint64(st.st_size)});
+    }
+
+    // Folders change mtime as entries come and go; their contents are checked one by one instead.
+    bool wasCopied(const struct stat &st) const {
+        const auto it = m_copied.constFind({quint64(st.st_dev), quint64(st.st_ino)});
+        if (it == m_copied.constEnd())
+            return false;
+        return S_ISDIR(st.st_mode) || (it->mtimeNs == mtimeNs(st) && it->size == qint64(st.st_size));
+    }
+
+    QHash<FileKey, Snapshot> m_copied;
     std::function<void(const std::function<void(Task::Progress &)> &)> m_update;
     std::function<bool()> m_cancelled;
     QString m_claimTarget;
@@ -533,7 +578,7 @@ void Task::run() {
                     measure(src, &bytes, &items);
                     update([&](Progress &p) { p.totalBytes += bytes; });
                     dest = worker.copyIntoPlace(src, target);
-                    if (!dest.isEmpty() && !worker.removeTree(src, false))
+                    if (!dest.isEmpty() && !worker.removeCopiedSource(src))
                         worker.error(src, QStringLiteral("copied, but the original could not be fully removed"));
                 } else if (dest.isEmpty()) {
                     worker.error(src, QString::fromLocal8Bit(strerror(err)));
@@ -564,6 +609,7 @@ void Task::run() {
             const QString info = trashInfoPath(src);
             QDir().mkpath(parentOf(to));
             QString dest;
+            bool removed = true;
             const int err = renameNoReplace(src, to);
             if (err == 0) {
                 dest = to;
@@ -573,14 +619,17 @@ void Task::run() {
                 measure(src, &bytes, &items);
                 update([&](Progress &p) { p.totalBytes += bytes; });
                 dest = worker.copyIntoPlace(src, parentOf(to), baseName(to));
-                if (!dest.isEmpty() && !worker.removeTree(src, false))
+                if (!dest.isEmpty() && !worker.removeCopiedSource(src)) {
                     worker.error(src, QStringLiteral("copied, but the original could not be fully removed"));
+                    removed = false;
+                }
             } else {
                 worker.error(src, err == EEXIST ? QStringLiteral("%1 already exists").arg(to)
                                                 : QString::fromLocal8Bit(strerror(err)));
             }
             if (!dest.isEmpty()) {
-                if (!info.isEmpty())
+                // A partly restored item stays listed in the trash.
+                if (!info.isEmpty() && removed)
                     unlink(QFile::encodeName(info).constData());
                 update([&](Progress &p) {
                     p.created << dest;

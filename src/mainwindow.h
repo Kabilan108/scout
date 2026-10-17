@@ -23,6 +23,16 @@
 
 class QTemporaryDir;
 
+// Device, inode and birth time: inode numbers alone get reused right away.
+struct FileStamp {
+    quint64 dev = 0;
+    quint64 ino = 0;
+    qint64 born = 0;
+    bool exists() const { return ino != 0; }
+    bool operator==(const FileStamp &) const = default;
+};
+FileStamp fileStamp(const QString &path);
+
 class MainWindow : public QWidget {
     Q_OBJECT
 public:
@@ -87,6 +97,9 @@ private:
         enum Kind { Moves, Renames, Restored } kind;
         QString description;
         QList<QPair<QString, QString>> pairs; // (original, current)
+        // Identity of each current path when recorded; undo leaves alone
+        // anything that has been replaced since.
+        QList<FileStamp> ids;
     };
 
     void buildUi();
@@ -154,7 +167,7 @@ private:
 
     void bulkRename();
     void startBulkRename(const QStringList &paths);
-    void finishBulkRename(const QStringList &paths, const QStringList &lines);
+    void finishBulkRename(const QStringList &paths, const QStringList &lines, const QString &baseDir);
     QString editorCommand() const;
 
     void chooserAccept(bool fromCursor);
