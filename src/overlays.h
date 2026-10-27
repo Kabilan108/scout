@@ -44,6 +44,9 @@ public:
     explicit StatusBar(QWidget *parent = nullptr);
     void setLeft(const QStringList &segments);
     void setRight(const QStringList &segments);
+    // A mode badge such as "VISUAL" at the far left; empty hides it.
+    void setMode(const QString &mode);
+    QString mode() const { return m_mode; }
     void showMessage(const QString &message, Level level = Level::Info, int timeoutMs = 4000);
     QString message() const { return m_message; }
     // Number of items offered by the drag chip; 0 hides it.
@@ -60,6 +63,7 @@ protected:
 private:
     QStringList m_left;
     QStringList m_right;
+    QString m_mode;
     QString m_message;
     Level m_level = Level::Info;
     QTimer m_messageTimer;
@@ -84,13 +88,21 @@ class WhichKey : public Card {
 public:
     using Card::Card;
     void setContinuations(const QString &prefix, const QList<Continuation> &items);
-    QSize preferredSize(int maxWidth) const;
+    QSize preferredSize(int maxWidth, int maxHeight) const;
+    // Entries left out at the current size, summarised as "+N more".
+    int hiddenCount() const { return layout(size()).hidden; }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    int columns(int width) const;
+    struct Layout {
+        int columns = 1;
+        int rows = 0;
+        int columnWidth = 0;
+        int hidden = 0;
+    };
+    Layout layout(const QSize &size) const;
     int columnWidth() const;
 
     QString m_prefix;

@@ -252,6 +252,13 @@ void Marks::clear() {
     emit changed();
 }
 
+void Marks::set(const QSet<QString> &paths) {
+    if (paths == m_paths)
+        return;
+    m_paths = paths;
+    emit changed();
+}
+
 DirModel::DirModel(Marks *marks, QObject *parent) : QAbstractListModel(parent), m_marks(marks) {
     m_reloadTimer.setSingleShot(true);
     m_reloadTimer.setInterval(120);

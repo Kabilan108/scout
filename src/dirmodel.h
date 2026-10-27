@@ -57,6 +57,8 @@ public:
     void add(const QStringList &paths);
     void remove(const QStringList &paths);
     void clear();
+    void set(const QSet<QString> &paths);
+    QSet<QString> pathSet() const { return m_paths; }
 
 signals:
     void changed();

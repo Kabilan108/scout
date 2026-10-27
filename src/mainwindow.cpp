@@ -137,6 +137,8 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
         loadConfig();
     applyTheme();
     connect(&Theme::instance(), &Theme::changed, this, &MainWindow::applyTheme);
+    // Clicks land on child widgets, so watch them all to drop half-typed key sequences.
+    QCoreApplication::instance()->installEventFilter(this);
 
     QString start = startPath.isEmpty() ? QDir::currentPath() : startPath;
     if (start.startsWith(QLatin1String("file://")))
@@ -149,6 +151,7 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
 }
 
 MainWindow::~MainWindow() {
+    QCoreApplication::instance()->removeEventFilter(this);
     m_walker.cancel();
     if (auto done = std::exchange(m_chooserDone, {}))
         done(ChooserResult{});
@@ -212,6 +215,7 @@ void MainWindow::buildUi() {
     });
     connect(m_currentView, &ColumnView::rowActivated, this, [this](int row) {
         setCursor(row);
+        endVisual();
         enter();
     });
     auto previewEntry = [this](int row) -> std::optional<FileEntry> {
@@ -242,10 +246,12 @@ void MainWindow::buildUi() {
                 });
     }
     connect(m_currentView, &ColumnView::markToggleRequested, this, [this](int row) {
+        endVisual();
         if (const FileEntry *e = m_currentModel->entry(row))
             m_marks.toggle(e->path);
     });
     connect(m_currentView, &ColumnView::markRangeRequested, this, [this](int row) {
+        endVisual();
         const int from = std::max(0, cursorRow());
         QStringList paths;
         for (int r = std::min(from, row); r <= std::max(from, row); ++r)
@@ -382,6 +388,7 @@ bool MainWindow::cd(const QString &path, const QString &selectName, bool recordH
         }
         return true;
     }
+    endVisual();
     if (recordHistory && !m_cwd.isEmpty()) {
         m_back << m_cwd;
         m_forward.clear();
@@ -418,6 +425,7 @@ void MainWindow::onCursorMoved() {
             m_lastRow = cursorRow();
         }
     }
+    updateVisual();
     updateHeader();
     updateStatus();
     m_previewTimer.start();
@@ -486,6 +494,7 @@ void MainWindow::updateStatus() {
             left << QStringLiteral("→ ") + e->linkTarget;
     }
     m_status->setLeft(left);
+    m_status->setMode(m_visual ? QStringLiteral("VISUAL") : QString());
 
     QStringList right;
     if (m_keys.isPending())
@@ -666,6 +675,8 @@ void MainWindow::openPrompt(PromptSpec spec) {
 }
 
 bool MainWindow::event(QEvent *event) {
+    if (event->type() == QEvent::WindowDeactivate && m_whichKey && (m_keys.isPending() || m_whichKey->isVisible()))
+        cancelPendingKeys();
     if (event->type() == QEvent::KeyPress && !m_prompt->isOpen()) {
         auto *key = static_cast<QKeyEvent *>(event);
         const bool plainTab = (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab) &&
@@ -693,14 +704,10 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     if (token.isEmpty())
         return;
     if (token == QLatin1String("<Esc>")) {
-        if (m_keys.isPending()) {
-            m_keys.reset();
-            hideWhichKey();
-            m_ambiguityTimer.stop();
-            updateStatus();
-        } else if (!handleEscape() && isChooser()) {
+        if (m_keys.isPending())
+            cancelPendingKeys();
+        else if (!handleEscape() && isChooser())
             finishChooser(false);
-        }
         return;
     }
     const KeyMap::Result result = m_keys.feed(token);
@@ -713,9 +720,10 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     case KeyMap::Result::Pending:
         if (m_keys.hasAmbiguousExact())
             m_ambiguityTimer.start();
+        // A bare count ("12") would list every binding; the status bar shows it instead.
         if (m_whichKey->isVisible())
             showWhichKey();
-        else if (!m_keys.pendingDisplay().isEmpty() && !m_keys.continuations().isEmpty())
+        else if (m_keys.hasPendingKeys() && !m_keys.continuations().isEmpty())
             m_whichKeyTimer.start();
         break;
     case KeyMap::Result::None:
@@ -728,7 +736,9 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
 
 bool MainWindow::handleEscape() {
     bool handled = true;
-    if (!m_currentModel->filter().isEmpty()) {
+    if (m_visual) {
+        endVisual();
+    } else if (!m_currentModel->filter().isEmpty()) {
         m_currentModel->setFilter({});
         message(QStringLiteral("filter cleared"));
     } else if (!m_marks.isEmpty()) {
@@ -747,7 +757,7 @@ bool MainWindow::handleEscape() {
 
 void MainWindow::showWhichKey() {
     const QList<Continuation> items = m_keys.continuations();
-    if (items.isEmpty() || m_keys.pendingDisplay().isEmpty()) {
+    if (items.isEmpty() || !m_keys.hasPendingKeys()) {
         hideWhichKey();
         return;
     }
@@ -760,6 +770,50 @@ void MainWindow::showWhichKey() {
 void MainWindow::hideWhichKey() {
     m_whichKeyTimer.stop();
     m_whichKey->hide();
+}
+
+void MainWindow::cancelPendingKeys() {
+    m_keys.reset();
+    m_ambiguityTimer.stop();
+    hideWhichKey();
+    updateStatus();
+}
+
+void MainWindow::startVisual() {
+    const FileEntry *e = currentEntry();
+    if (!e)
+        return;
+    m_visual = true;
+    m_visualAnchor = e->name;
+    m_visualAnchorRow = cursorRow();
+    m_visualBase = m_marks.pathSet();
+    updateVisual();
+    updateStatus();
+}
+
+void MainWindow::endVisual() {
+    if (!m_visual)
+        return;
+    m_visual = false;
+    m_visualBase.clear();
+    updateStatus();
+}
+
+void MainWindow::updateVisual() {
+    if (!m_visual || m_currentModel->path() != m_cwd || !m_currentModel->isLoaded())
+        return;
+    QSet<QString> marks = m_visualBase;
+    const int count = m_currentModel->rowCount();
+    if (count > 0) {
+        // The anchor follows its entry across reloads; if it is gone, its old row stands in.
+        int anchor = m_currentModel->rowOf(m_visualAnchor);
+        if (anchor < 0)
+            anchor = std::clamp(m_visualAnchorRow, 0, count - 1);
+        const int cursor = std::clamp(cursorRow(), 0, count - 1);
+        for (int r = std::min(anchor, cursor); r <= std::max(anchor, cursor); ++r)
+            marks.insert(m_currentModel->entry(r)->path);
+    }
+    m_marks.set(marks);
 }
 
 void MainWindow::handleOverlayKey(QKeyEvent *event) {
@@ -862,6 +916,7 @@ void MainWindow::positionOverlays() {
     if (!m_bottom)
         return;
     const int margin = 8;
+    const int top = m_header->geometry().bottom() + 4;
     const int bottom = m_bottom->geometry().top() - 4;
     if (m_picker->isVisible()) {
         const int h = std::min(m_picker->preferredHeight(), int(height() * 0.6));
@@ -869,8 +924,9 @@ void MainWindow::positionOverlays() {
         m_picker->raise();
     }
     if (m_whichKey->isVisible()) {
-        const QSize s = m_whichKey->preferredSize(std::min(width() - 2 * margin, 980));
-        m_whichKey->setGeometry(width() - s.width() - margin, bottom - s.height(), s.width(), s.height());
+        const QSize s = m_whichKey->preferredSize(std::max(1, width() - 2 * margin), std::max(1, bottom - top));
+        m_whichKey->setGeometry(std::max(0, width() - s.width() - margin), std::max({0, top, bottom - s.height()}),
+                                s.width(), s.height());
     }
     if (m_tasksView->isVisible()) {
         const QSize s = m_tasksView->preferredSize(width() - 4 * margin, height() - 120);
@@ -1413,6 +1469,7 @@ void MainWindow::showHelp() {
 }
 
 void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
+    endVisual();
     QMenu menu(this);
     auto add = [&](const QString &label, const QString &command) {
         const QString keys = m_keys.keysFor(command);
@@ -1472,6 +1529,17 @@ bool MainWindow::runCommandLine(const QString &line, int count) {
         error(QStringLiteral("unknown command: %1").arg(parts.first()));
         return false;
     }
+    // Anything but cursor motion ends visual mode first and then acts on the marks it left.
+    static const QSet<QString> keepsVisual = {
+        QStringLiteral("visual"),         QStringLiteral("down"),         QStringLiteral("up"),
+        QStringLiteral("top"),            QStringLiteral("bottom"),       QStringLiteral("half-page-down"),
+        QStringLiteral("half-page-up"),   QStringLiteral("page-down"),    QStringLiteral("page-up"),
+        QStringLiteral("search"),         QStringLiteral("search-back"),  QStringLiteral("search-next"),
+        QStringLiteral("search-prev"),    QStringLiteral("preview-down"), QStringLiteral("preview-up"),
+        QStringLiteral("zoom-in"),        QStringLiteral("zoom-out"),
+    };
+    if (!keepsVisual.contains(def->name))
+        endVisual();
     if (def->requiresArgs && parts.size() < 2) {
         promptCommand(def->name + u' ');
         return true;
@@ -1542,6 +1610,13 @@ void MainWindow::registerCommands() {
             paths << m_currentModel->entry(r)->path;
         m_marks.add(paths);
     });
+    cmd(QStringLiteral("visual"), QStringLiteral("Visual mode: mark everything between here and the cursor as it moves"),
+        [this](const CommandContext &) {
+            if (m_visual)
+                endVisual();
+            else
+                startVisual();
+        });
     cmd(QStringLiteral("invert-marks"), QStringLiteral("Invert marks in this folder"), [this](const CommandContext &) {
         QStringList add, remove;
         for (int r = 0; r < m_currentModel->rowCount(); ++r) {
@@ -1891,7 +1966,9 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("<C-p>"), QStringLiteral("find"));
 
     bind(QStringLiteral("<Space>"), QStringLiteral("toggle-mark"));
-    bind(QStringLiteral("v"), QStringLiteral("invert-marks"));
+    bind(QStringLiteral("v"), QStringLiteral("visual"));
+    bind(QStringLiteral("V"), QStringLiteral("visual"));
+    bind(QStringLiteral("*"), QStringLiteral("invert-marks"));
     bind(QStringLiteral("<C-a>"), QStringLiteral("mark-all"));
     bind(QStringLiteral("uv"), QStringLiteral("unmark-all"));
     bind(QStringLiteral("uu"), QStringLiteral("undo"));
@@ -2574,6 +2651,9 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::MouseButtonPress && watched->isWidgetType() &&
+        static_cast<QWidget *>(watched)->window() == this && (m_keys.isPending() || m_whichKey->isVisible()))
+        cancelPendingKeys();
     if (m_chooserBar && watched == m_chooserBar->nameEdit() && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         switch (key->key()) {

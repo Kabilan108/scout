@@ -128,6 +128,13 @@ void StatusBar::setRight(const QStringList &segments) {
     update();
 }
 
+void StatusBar::setMode(const QString &mode) {
+    if (mode == m_mode)
+        return;
+    m_mode = mode;
+    update();
+}
+
 void StatusBar::showMessage(const QString &message, Level level, int timeoutMs) {
     m_message = message;
     m_level = level;
@@ -166,6 +173,20 @@ void StatusBar::paintEvent(QPaintEvent *) {
     const QFontMetrics fm(font);
 
     int x = 10;
+    if (!m_mode.isEmpty()) {
+        QFont bold = font;
+        bold.setBold(true);
+        const QFontMetrics bfm(bold);
+        const QRect badge(6, 3, bfm.horizontalAdvance(m_mode) + 16, height() - 6);
+        p.setPen(Qt::NoPen);
+        p.setBrush(pal.accent);
+        p.drawRoundedRect(badge, 4, 4);
+        p.setFont(bold);
+        p.setPen(pal.crust);
+        p.drawText(badge, Qt::AlignCenter, m_mode);
+        p.setFont(font);
+        x = badge.right() + 12;
+    }
     p.setPen(pal.muted);
     for (const QString &s : m_left) {
         p.drawText(QRect(x, 0, width(), height()), Qt::AlignVCenter | Qt::AlignLeft, s);
@@ -260,14 +281,27 @@ int WhichKey::columnWidth() const {
     return std::min(w, 360);
 }
 
-int WhichKey::columns(int width) const {
-    return std::clamp((width - 28) / std::max(1, columnWidth()), 1, 4);
+WhichKey::Layout WhichKey::layout(const QSize &size) const {
+    Layout l;
+    const int n = int(m_items.size());
+    l.columnWidth = std::max(1, std::min(columnWidth(), size.width() - 28));
+    l.columns = std::clamp((size.width() - 28) / l.columnWidth, 1, std::max(1, n));
+    const int maxRows = std::max(1, (size.height() - 22) / lineHeight() - 1);
+    l.rows = std::min((n + l.columns - 1) / l.columns, maxRows);
+    const int capacity = l.columns * l.rows;
+    // The last slot turns into the "+N more" line.
+    l.hidden = n > capacity ? n - (capacity - 1) : 0;
+    return l;
 }
 
-QSize WhichKey::preferredSize(int maxWidth) const {
-    const int cols = std::min(columns(maxWidth), std::max(1, int(m_items.size())));
-    const int rows = (int(m_items.size()) + cols - 1) / cols;
-    return QSize(cols * columnWidth() + 28, (rows + 1) * lineHeight() + 22);
+QSize WhichKey::preferredSize(int maxWidth, int maxHeight) const {
+    // Stay compact while everything fits; spread across the window otherwise.
+    QSize bounds(std::min(maxWidth, 980), maxHeight);
+    if (layout(bounds).hidden > 0)
+        bounds.setWidth(maxWidth);
+    const Layout l = layout(bounds);
+    return QSize(std::min(maxWidth, l.columns * l.columnWidth + 28),
+                 std::min(maxHeight, (l.rows + 1) * lineHeight() + 22));
 }
 
 void WhichKey::paintEvent(QPaintEvent *) {
@@ -275,18 +309,24 @@ void WhichKey::paintEvent(QPaintEvent *) {
     paintFrame(p, m_prefix, {});
     const Palette &pal = Theme::p();
     const QFontMetrics fm(Theme::instance().font());
-    const int cols = columns(width());
-    const int rows = (int(m_items.size()) + cols - 1) / cols;
-    const int cw = columnWidth();
+    const Layout l = layout(size());
+    const int cw = l.columnWidth;
+    const int shown = int(m_items.size()) - l.hidden;
     int keyWidth = 0;
     for (const Continuation &c : m_items)
         keyWidth = std::max(keyWidth, fm.horizontalAdvance(c.key));
-    for (int i = 0; i < m_items.size(); ++i) {
-        const Continuation &c = m_items[i];
-        const int col = i / std::max(1, rows);
-        const int row = i % std::max(1, rows);
+    for (int i = 0; i < shown + (l.hidden > 0 ? 1 : 0); ++i) {
+        const int col = i / std::max(1, l.rows);
+        const int row = i % std::max(1, l.rows);
         const int x = 14 + col * cw;
         const int y = 8 + (row + 1) * lineHeight();
+        if (i == shown) {
+            p.setPen(pal.muted);
+            p.drawText(QRect(x, y, cw - 6, lineHeight()), Qt::AlignVCenter | Qt::AlignLeft,
+                       QStringLiteral("+%1 more").arg(l.hidden));
+            break;
+        }
+        const Continuation &c = m_items[i];
         p.setPen(pal.yellow);
         p.drawText(QRect(x, y, keyWidth, lineHeight()), Qt::AlignVCenter | Qt::AlignLeft, c.key);
         p.setPen(c.isPrefix ? pal.magenta : pal.text);

@@ -9,6 +9,7 @@
 #include "service.h"
 #include "theme.h"
 
+#include <QApplication>
 #include <QDBusArgument>
 #include <QDir>
 #include <QElapsedTimer>
@@ -579,6 +580,121 @@ private slots:
         QTRY_VERIFY(w.isIdle());
         QCOMPARE(w.tabCount(), 3);
         QCOMPARE(w.cwd(), base);
+    }
+
+    void whichKeySkipsCountsAndFitsSmallWindows() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.resize(500, 300);
+        w.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&w));
+        QTRY_VERIFY(w.isIdle());
+
+        keys(w, QStringLiteral("12"));
+        QVERIFY(w.keymap()->isPending());
+        QTest::qWait(500);
+        QVERIFY(!w.whichKey()->isVisible());
+        key(w, Qt::Key_Escape);
+        QVERIFY(!w.keymap()->isPending());
+
+        keys(w, QStringLiteral("g"));
+        QTRY_VERIFY(w.whichKey()->isVisible());
+        const QRect popup = w.whichKey()->geometry();
+        QVERIFY2(w.rect().contains(popup), qPrintable(QStringLiteral("popup %1,%2 %3x%4 in %5x%6")
+                                                          .arg(popup.x()).arg(popup.y()).arg(popup.width())
+                                                          .arg(popup.height()).arg(w.width()).arg(w.height())));
+        QVERIFY(popup.top() > w.statusBar()->height());
+        QVERIFY(popup.bottom() < w.height() - w.statusBar()->height());
+        QVERIFY(w.whichKey()->hiddenCount() > 0);
+
+        // Any click drops the half-typed sequence, and Esc still reaches the window afterwards.
+        QTest::mouseClick(w.currentView()->viewport(), Qt::LeftButton, {},
+                          w.currentView()->visualRect(w.currentModel()->index(1)).center());
+        QVERIFY(!w.whichKey()->isVisible());
+        QVERIFY(!w.keymap()->isPending());
+        QCOMPARE(currentName(w), QStringLiteral("beta"));
+        QVERIFY(QTest::qWaitForWindowActive(&w));
+        QCOMPARE(QApplication::focusWidget(), &w);
+        keys(w, QStringLiteral("5g"));
+        QTRY_VERIFY(w.whichKey()->isVisible());
+        key(w, Qt::Key_Escape);
+        QVERIFY(!w.whichKey()->isVisible());
+        QVERIFY(!w.keymap()->isPending());
+
+        w.resize(1200, 760);
+        keys(w, QStringLiteral("g"));
+        QTRY_VERIFY(w.whichKey()->isVisible());
+        QVERIFY(w.rect().contains(w.whichKey()->geometry()));
+        QCOMPARE(w.whichKey()->hiddenCount(), 0);
+        QEvent deactivate(QEvent::WindowDeactivate);
+        QCoreApplication::sendEvent(&w, &deactivate);
+        QVERIFY(!w.whichKey()->isVisible());
+        QVERIFY(!w.keymap()->isPending());
+    }
+
+    void visualModeMarksARange() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        auto marked = [&](const char *name) { return w.marks()->contains(base + u'/' + QLatin1String(name)); };
+
+        keys(w, QStringLiteral("vjj"));
+        QVERIFY(w.isVisualMode());
+        QCOMPARE(w.statusBar()->mode(), QStringLiteral("VISUAL"));
+        QCOMPARE(w.marks()->size(), 3);
+        QVERIFY(marked("alpha") && marked("beta") && marked("file2.txt"));
+        keys(w, QStringLiteral("k"));
+        QCOMPARE(w.marks()->size(), 2);
+        QVERIFY(!marked("file2.txt"));
+        key(w, Qt::Key_Escape);
+        QVERIFY(!w.isVisualMode());
+        QVERIFY(w.statusBar()->mode().isEmpty());
+        QCOMPARE(w.marks()->size(), 2);
+        key(w, Qt::Key_Escape);
+        QCOMPARE(w.marks()->size(), 0);
+
+        // Marks from before stay put while the range grows and shrinks.
+        keys(w, QStringLiteral("G"));
+        key(w, Qt::Key_Space);
+        keys(w, QStringLiteral("ggvj"));
+        QCOMPARE(w.marks()->size(), 3);
+        keys(w, QStringLiteral("k"));
+        QCOMPARE(w.marks()->size(), 2);
+        QVERIFY(marked("alpha") && marked("notes.md"));
+        QTest::mouseClick(w.currentView()->viewport(), Qt::LeftButton, {},
+                          w.currentView()->visualRect(w.currentModel()->index(2)).center());
+        QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
+        QCOMPARE(w.marks()->size(), 4);
+        keys(w, QStringLiteral("V"));
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(w.marks()->size(), 4);
+        key(w, Qt::Key_Escape);
+
+        // A command on the targets leaves visual mode and acts on the range.
+        keys(w, QStringLiteral("ggjvj"));
+        keys(w, QStringLiteral("yy"));
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(w.statusBar()->message(), QStringLiteral("copied 2 items"));
+        QCOMPARE(clipboardFiles().paths, (QStringList{base + QStringLiteral("/beta"), base + QStringLiteral("/file2.txt")}));
+
+        // Leaving the folder ends visual mode and keeps the marks.
+        keys(w, QStringLiteral("ggvj"));
+        keys(w, QStringLiteral("l"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), base + QStringLiteral("/beta"));
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(w.marks()->size(), 2);
+        keys(w, QStringLiteral("h"));
+        QTRY_VERIFY(w.isIdle());
+        key(w, Qt::Key_Escape);
+        QCOMPARE(w.marks()->size(), 0);
+
+        keys(w, QStringLiteral("gg"));
+        key(w, Qt::Key_Space);
+        keys(w, QStringLiteral("*"));
+        QCOMPARE(w.marks()->size(), 4);
+        QVERIFY(!marked("alpha"));
     }
 
     void undoTrashMoveRenameAndCopy() {

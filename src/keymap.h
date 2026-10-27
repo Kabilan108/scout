@@ -38,6 +38,7 @@ public:
     void reset();
 
     bool isPending() const { return !m_pending.isEmpty() || m_count > 0; }
+    bool hasPendingKeys() const { return !m_pending.isEmpty(); }
     bool hasAmbiguousExact() const;
     QString pendingDisplay() const;
     QList<Continuation> continuations() const;

@@ -49,6 +49,8 @@ public:
     Prompt *prompt() const { return m_prompt; }
     PickerList *picker() const { return m_picker; }
     StatusBar *statusBar() const { return m_status; }
+    WhichKey *whichKey() const { return m_whichKey; }
+    bool isVisualMode() const { return m_visual; }
     TaskManager *tasks() { return &m_tasks; }
     Marks *marks() { return &m_marks; }
     KeyMap *keymap() { return &m_keys; }
@@ -130,6 +132,10 @@ private:
     void handleOverlayKey(QKeyEvent *event);
     void showWhichKey();
     void hideWhichKey();
+    void cancelPendingKeys();
+    void startVisual();
+    void endVisual();
+    void updateVisual();
     void showTasks();
     void showProperties();
     void closeOverlay();
@@ -206,6 +212,12 @@ private:
     bool m_searchBackwards = false;
     ClipboardFiles m_register;
     QString m_propertiesPath;
+
+    // Visual mode: marks are the ones from before plus anchor..cursor.
+    bool m_visual = false;
+    QString m_visualAnchor;
+    int m_visualAnchorRow = 0;
+    QSet<QString> m_visualBase;
 
     // Fuzzy finder
     FileWalker m_walker;

@@ -47,7 +47,8 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `gf` / `Ctrl-p` | fuzzy find below the current folder |
 | `/` `n` `N` | jump to a matching name |
 | `f` / `zf` | filter the folder as you type (`Esc` clears) |
-| `Space` `v` `Ctrl-a` `uv` | mark and move down, invert, mark all, unmark |
+| `Space` `*` `Ctrl-a` `uv` | mark and move down, invert, mark all, unmark |
+| `v` / `V` | visual mode: moving the cursor marks every row from where you pressed `v`; `v`, `V`, or `Esc` stops and keeps the marks |
 | `yy` `dd` `pp` | copy, cut, paste (also `Ctrl-c` `Ctrl-x` `Ctrl-v`) |
 | `pl` | paste as symlinks |
 | `yp` `yn` `yd` | copy path, name, or folder path as text |
@@ -71,7 +72,9 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `Ctrl-=` `Ctrl--` | zoom |
 
 Marks persist across folders and tabs, so you can collect files from several
-places and then copy, trash, or drag them together.
+places and then copy, trash, or drag them together. Visual mode ends when you
+leave the folder or run a command such as `yy` or `dD`, which then acts on
+everything marked.
 
 ## Undo, trash, and bulk rename
 
