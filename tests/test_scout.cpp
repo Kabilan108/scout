@@ -14,10 +14,12 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QMenu>
 #include <QMimeData>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUrl>
 
 #include <cerrno>
@@ -695,6 +697,43 @@ private slots:
         keys(w, QStringLiteral("*"));
         QCOMPARE(w.marks()->size(), 4);
         QVERIFY(!marked("alpha"));
+        key(w, Qt::Key_Escape);
+
+        // Right-clicking another row ends visual mode with the range it had.
+        auto closeMenuSoon = [&w] {
+            QTimer::singleShot(0, &w, [] {
+                for (QWidget *top : QApplication::topLevelWidgets())
+                    if (auto *menu = qobject_cast<QMenu *>(top); menu && menu->isVisible())
+                        menu->close();
+            });
+        };
+        const QPoint fourth = w.currentView()->visualRect(w.currentModel()->index(3)).center();
+        keys(w, QStringLiteral("ggvj"));
+        const QSet<QString> range = w.marks()->pathSet();
+        closeMenuSoon();
+        QTest::mouseClick(w.currentView()->viewport(), Qt::RightButton, {}, fourth);
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(w.marks()->pathSet(), range);
+        keys(w, QStringLiteral("ggvj"));
+        closeMenuSoon();
+        emit w.currentView()->customContextMenuRequested(fourth);
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(currentName(w), QStringLiteral("file10.txt"));
+        QCOMPARE(w.marks()->pathSet(), range);
+        key(w, Qt::Key_Escape);
+
+        // Switching tabs clears the filter, which must not stretch the range over the rows it hid.
+        keys(w, QStringLiteral("G"));
+        w.runCommandLine(QStringLiteral("new-tab"));
+        QTRY_VERIFY(w.isIdle());
+        w.currentModel()->setFilter(QStringLiteral("l"));
+        keys(w, QStringLiteral("ggvj"));
+        QVERIFY(marked("alpha") && marked("file2.txt"));
+        emit w.findChild<HeaderBar *>()->tabClicked(0);
+        QTRY_VERIFY(w.isIdle());
+        QVERIFY(!w.isVisualMode());
+        QCOMPARE(w.marks()->size(), 2);
+        QVERIFY(!marked("beta"));
     }
 
     void undoTrashMoveRenameAndCopy() {

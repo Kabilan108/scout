@@ -262,8 +262,6 @@ ColumnView::ColumnView(DirModel *model, Role role, QWidget *parent)
     setAutoFillBackground(true);
     connect(this, &QWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
         const QModelIndex idx = indexAt(pos);
-        if (idx.isValid() && m_role == Role::Current)
-            setCurrentIndex(idx);
         emit contextMenuRequested(idx.isValid() ? idx.row() : -1, viewport()->mapToGlobal(pos));
     });
     verticalScrollBar()->setSingleStep(Theme::instance().rowHeight());

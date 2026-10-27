@@ -1470,6 +1470,8 @@ void MainWindow::showHelp() {
 
 void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
     endVisual();
+    if (row >= 0)
+        setCursor(row);
     QMenu menu(this);
     auto add = [&](const QString &label, const QString &command) {
         const QString keys = m_keys.keysFor(command);
@@ -2073,6 +2075,8 @@ void MainWindow::saveTab() {
 void MainWindow::loadTab(int index) {
     if (index < 0 || index >= m_tabs.size())
         return;
+    // Before the filter is cleared, which would otherwise stretch the range over the rows it hid.
+    endVisual();
     m_tab = index;
     const Tab t = m_tabs[index];
     m_back = t.back;
@@ -2652,8 +2656,13 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::MouseButtonPress && watched->isWidgetType() &&
-        static_cast<QWidget *>(watched)->window() == this && (m_keys.isPending() || m_whichKey->isVisible()))
-        cancelPendingKeys();
+        static_cast<QWidget *>(watched)->window() == this) {
+        if (m_keys.isPending() || m_whichKey->isVisible())
+            cancelPendingKeys();
+        // A right press moves the cursor before the context menu opens; the menu acts on the range as it was.
+        if (watched == m_currentView->viewport() && static_cast<QMouseEvent *>(event)->button() == Qt::RightButton)
+            endVisual();
+    }
     if (m_chooserBar && watched == m_chooserBar->nameEdit() && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         switch (key->key()) {
