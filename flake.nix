@@ -13,6 +13,10 @@
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
+      overlays.default = final: prev: {
+        scout = final.callPackage ./package.nix { };
+      };
+
       packages = forAllSystems (pkgs: {
         scout = pkgs.callPackage ./package.nix { };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.scout;
