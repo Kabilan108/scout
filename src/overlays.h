@@ -205,6 +205,9 @@ private:
     };
     QList<Placed> place(int width, int *height) const;
     int groupWidth() const;
+    int keyColumn() const;
+    // An entry's keys, packed onto as many lines as the key column needs.
+    QStringList keyLines(const Entry &entry) const;
     int groupHeight(const Group &group) const;
     int introHeight() const;
 

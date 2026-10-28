@@ -672,19 +672,25 @@ private slots:
         QTRY_VERIFY(w.isIdle());
         w.runCommandLine(QStringLiteral("map <C-y> copy"));
         w.runCommandLine(QStringLiteral("unmap yy"));
+        w.runCommandLine(QStringLiteral("map <A-q> leave"));
         key(w, Qt::Key_K, Qt::ControlModifier);
         keys(w, QStringLiteral("keymap"));
         QCOMPARE(w.picker()->items().first().text, QStringLiteral("Show key map"));
         key(w, Qt::Key_Return);
         QVERIFY(w.keyMapSheet()->isVisible());
         QStringList titles;
-        QString copyKeys;
+        QString copyKeys, leaveKeys;
         for (const KeyMapSheet::Group &g : w.keyMapSheet()->groups()) {
             titles << g.title;
-            for (const KeyMapSheet::Entry &e : g.entries)
+            for (const KeyMapSheet::Entry &e : g.entries) {
                 if (e.description == QLatin1String("Copy to the clipboard"))
                     copyKeys = e.keys;
+                if (e.description == QLatin1String("Go to the parent folder"))
+                    leaveKeys = e.keys;
+            }
         }
+        // A fifth key for one command still shows.
+        QVERIFY2(leaveKeys.contains(QStringLiteral("Alt-q")), qPrintable(leaveKeys));
         QCOMPARE(titles.mid(0, 9), (QStringList{QStringLiteral("Move"), QStringLiteral("Go"), QStringLiteral("Select"),
                                                QStringLiteral("Copy & move"), QStringLiteral("Remove & undo"),
                                                QStringLiteral("Change"), QStringLiteral("Find"), QStringLiteral("View"),

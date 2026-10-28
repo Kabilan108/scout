@@ -1066,7 +1066,7 @@ void MainWindow::showKeyMap() {
             continue;
         }
         const int group = line.rank >= 100000 ? int(groups.size()) - 1 : line.rank / 100;
-        groups[group].entries.append({line.keys.mid(0, 4).join(u' '), line.description});
+        groups[group].entries.append({line.keys.join(u' '), line.description});
     }
     std::sort(tabKeys.begin(), tabKeys.end());
     if (tabKeys.size() >= 3)

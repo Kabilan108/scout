@@ -641,8 +641,33 @@ int KeyMapSheet::groupWidth() const {
     return std::clamp(std::min(keys, 150) + 14 + std::min(desc, 260) + 24, 200, 440);
 }
 
+int KeyMapSheet::keyColumn() const {
+    const QFontMetrics fm(Theme::instance().font());
+    int w = 0;
+    for (const Group &g : m_groups)
+        for (const Entry &e : g.entries)
+            w = std::max(w, fm.horizontalAdvance(e.keys));
+    return std::min(w, 150);
+}
+
+QStringList KeyMapSheet::keyLines(const Entry &entry) const {
+    const QFontMetrics fm(Theme::instance().font());
+    const int width = keyColumn();
+    QStringList lines;
+    for (const QString &key : entry.keys.split(u' ', Qt::SkipEmptyParts)) {
+        if (!lines.isEmpty() && fm.horizontalAdvance(lines.last() + u' ' + key) <= width)
+            lines.last() += u' ' + key;
+        else
+            lines << key;
+    }
+    return lines.isEmpty() ? QStringList{QString()} : lines;
+}
+
 int KeyMapSheet::groupHeight(const Group &group) const {
-    return card::headerHeight() - 4 + int(group.entries.size()) * lineHeight() + 8;
+    int lines = 0;
+    for (const Entry &e : group.entries)
+        lines += int(keyLines(e).size());
+    return card::headerHeight() - 4 + lines * lineHeight() + 8;
 }
 
 int KeyMapSheet::introHeight() const { return 2 * lineHeight() + 10; }
@@ -736,13 +761,7 @@ void KeyMapSheet::paintEvent(QPaintEvent *) {
 
     p.save();
     p.setClipRect(content);
-    const int keyColumn = [&] {
-        int w = 0;
-        for (const Group &g : m_groups)
-            for (const Entry &e : g.entries)
-                w = std::max(w, fm.horizontalAdvance(e.keys));
-        return std::min(w, 150);
-    }();
+    const int keyWidth = keyColumn();
     for (const Placed &pl : placed) {
         const Group &g = m_groups[pl.group];
         const QRect box = pl.rect.translated(content.left(), content.top() - m_scroll);
@@ -760,13 +779,15 @@ void KeyMapSheet::paintEvent(QPaintEvent *) {
         int ry = box.top() + card::headerHeight() - 4;
         for (const Entry &e : g.entries) {
             p.setPen(pal.yellow);
-            p.drawText(QRect(box.left() + 12, ry, keyColumn, lineHeight()), Qt::AlignVCenter | Qt::AlignLeft,
-                       fm.elidedText(e.keys, Qt::ElideRight, keyColumn));
-            const int dx = box.left() + 12 + keyColumn + 14;
+            const QStringList keyText = keyLines(e);
+            for (int i = 0; i < keyText.size(); ++i)
+                p.drawText(QRect(box.left() + 12, ry + i * lineHeight(), keyWidth, lineHeight()),
+                           Qt::AlignVCenter | Qt::AlignLeft, fm.elidedText(keyText[i], Qt::ElideRight, keyWidth));
+            const int dx = box.left() + 12 + keyWidth + 14;
             p.setPen(pal.text);
             p.drawText(QRect(dx, ry, box.right() - 12 - dx, lineHeight()), Qt::AlignVCenter | Qt::AlignLeft,
                        fm.elidedText(e.description, Qt::ElideRight, box.right() - 12 - dx));
-            ry += lineHeight();
+            ry += int(keyText.size()) * lineHeight();
         }
     }
     p.restore();
