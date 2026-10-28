@@ -607,6 +607,7 @@ private slots:
                 QCOMPARE(b.command, QStringLiteral("find"));
         }
 
+        w.runCommandLine(QStringLiteral("map <A-q> leave"));
         key(w, Qt::Key_K, Qt::ControlModifier);
         QVERIFY(w.prompt()->isOpen());
         QCOMPARE(w.prompt()->style(), PromptSpec::Style::Palette);
@@ -626,6 +627,11 @@ private slots:
         // Keys and several words are searchable.
         keys(w, QStringLiteral("zh"));
         QCOMPARE(w.picker()->items().first().description, QStringLiteral("toggle-hidden"));
+        // Every key counts, however many a command has.
+        w.prompt()->edit()->clear();
+        keys(w, QStringLiteral("Alt-q"));
+        QVERIFY(!w.picker()->items().isEmpty());
+        QCOMPARE(w.picker()->items().first().description, QStringLiteral("leave"));
         w.prompt()->edit()->clear();
         keys(w, QStringLiteral("copy path"));
         QCOMPARE(w.picker()->items().first().description, QStringLiteral("copy-path"));
@@ -710,12 +716,15 @@ private slots:
         QTRY_COMPARE(shelf->title(), QStringLiteral("notes.md"));
         QVERIFY(shelf->value(QStringLiteral("Size")).contains(QStringLiteral("19 bytes")));
         QVERIFY(shelf->value(QStringLiteral("Access")).contains(QStringLiteral("-rw")));
+        writeFile(base + QStringLiteral("/notes.md"), "# Notes, now longer\n");
+        w.runCommandLine(QStringLiteral("reload"));
+        QTRY_VERIFY(shelf->value(QStringLiteral("Size")).contains(QStringLiteral("20 bytes")));
         // Marks turn it into a summary.
         key(w, Qt::Key_Space);
         keys(w, QStringLiteral("gg"));
         key(w, Qt::Key_Space);
         QTRY_COMPARE(shelf->title(), QStringLiteral("2 items"));
-        QTRY_VERIFY(shelf->value(QStringLiteral("Total size")).contains(QStringLiteral("31 bytes")));
+        QTRY_VERIFY(shelf->value(QStringLiteral("Total size")).contains(QStringLiteral("32 bytes")));
         key(w, Qt::Key_Escape);
         QVERIFY(shelf->isVisible());
         key(w, Qt::Key_Return, Qt::AltModifier);
@@ -726,6 +735,11 @@ private slots:
         QVERIFY(shelf->isVisible());
         key(w, Qt::Key_Escape);
         QVERIFY(!shelf->isVisible());
+        // An empty folder shows nothing rather than the last item.
+        w.cd(base + QStringLiteral("/beta"));
+        QTRY_VERIFY(w.isIdle());
+        key(w, Qt::Key_Return, Qt::AltModifier);
+        QCOMPARE(shelf->title(), QStringLiteral("Nothing selected"));
     }
 
     void tabsShowEvenWhenThereIsOne() {

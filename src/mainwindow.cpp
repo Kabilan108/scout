@@ -549,6 +549,8 @@ void MainWindow::onCurrentRefreshed() {
     if (hiddenByFilter)
         m_lastSelected[m_cwd] = want;
     m_previewTimer.stop();
+    // A reload may have changed the size or times of the same targets.
+    m_propertiesKey.reset();
     updatePreview();
 }
 
@@ -1102,7 +1104,7 @@ void MainWindow::toggleProperties() {
             m_sizeCount->cancel = true;
         m_sizeCount.reset();
         m_sizeTimer.stop();
-        m_propertiesKey.clear();
+        m_propertiesKey.reset();
         m_shelf->hide();
     }
     updatePreview();
@@ -1745,14 +1747,14 @@ QList<PickerItem> MainWindow::commandItems(const QString &query) const {
         item.text = def->description;
         item.description = def->name;
         item.data = QStringLiteral("cmd:") + def->name;
-        rows.append({item, keys.value(def->name).mid(0, 4).join(QStringLiteral("  "))});
+        rows.append({item, keys.value(def->name).join(QStringLiteral("  "))});
     }
     for (const QString &line : withArgs) {
         PickerItem item;
         item.text = descriptions.value(line);
         item.description = line;
         item.data = QStringLiteral("line:") + line;
-        rows.append({item, keys.value(line).mid(0, 4).join(QStringLiteral("  "))});
+        rows.append({item, keys.value(line).join(QStringLiteral("  "))});
     }
 
     QList<std::pair<int, PickerItem>> scored;

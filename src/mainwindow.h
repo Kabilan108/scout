@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 
 #include "chooser.h"
 #include "clipboard.h"
@@ -233,7 +234,8 @@ private:
         std::atomic<int> children = -1;
     };
     bool m_propertiesOpen = false;
-    QString m_propertiesKey;
+    // The targets the shelf shows; unset forces a refresh.
+    std::optional<QString> m_propertiesKey;
     std::shared_ptr<SizeCount> m_sizeCount;
     QTimer m_sizeTimer;
 
