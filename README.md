@@ -4,8 +4,8 @@ A keyboard-first, ranger-style file manager for Wayland, built on Qt 6.
 
 Three columns: the parent folder, the current folder, and a live preview of
 whatever is under the cursor. Vim keys, a which-key popup for multi-key
-bindings, a fuzzy finder, and a command line. Every action is a named command,
-so keys, the `:` palette, the right-click menu and the config file all go
+bindings, a fuzzy finder, and a command palette. Every action is a named command,
+so keys, the `Ctrl-k` palette, the right-click menu and the config file all go
 through the same path. The mouse works, including dragging files out to other
 apps, but nothing needs it.
 
@@ -29,14 +29,16 @@ From a checkout: `nix run .` or `nix develop`, then
 
 ## Keys
 
-Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
-`z`) and wait for the which-key popup.
+Press `Ctrl-k` for the command palette, which lists every command with its
+keys, or a prefix key (`g`, `y`, `d`, `p`, `s`, `z`, `u`) and wait for the
+which-key popup. The palette's "Show key map" row (`:keymap`) opens a cheat
+sheet grouped by task, built from your current bindings.
 
 | Keys | Action |
 | --- | --- |
 | `h` `j` `k` `l` / arrows | parent, down, up, enter (or open a file) |
 | `Enter` | open with the default app |
-| `gg` `G` `5j` `Ctrl-d` `Ctrl-u` | top, bottom, counts, half pages |
+| `gg` `G` `5j` `Ctrl-d` `Ctrl-u` | top, bottom, counts, half pages (`PageDown` `PageUp` for whole pages) |
 | `H` `L` | back and forward in history |
 | `gh` `gd` `gD` `gp` `gv` `gM` | home, Downloads, Documents, Pictures, Videos, Music |
 | `gc` `gr` `g/` `gb` `gm` | ~/.config, ~/repos, /, the trash (bin), mounted drives |
@@ -44,9 +46,10 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `gt` `gT` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
 | `q` / `Ctrl-w` | close the tab (the window, if it's the last); `Ctrl-q` closes the window |
 | `uq` | reopen the last closed tab |
-| `gf` / `Ctrl-p` | fuzzy find below the current folder |
-| `/` `n` `N` | jump to a matching name |
-| `f` / `zf` | filter the folder as you type (`Esc` clears) |
+| `Ctrl-k` | command palette: search commands and keys, or type a command line |
+| `Ctrl-f` | fuzzy find below the current folder |
+| `/` `n` `N` | jump to a matching name or glob (`*.png`) |
+| `f` / `zf` | filter the folder as you type, by text or glob (`Esc` clears) |
 | `Space` `*` `Ctrl-a` `uv` | mark and move down, invert, mark all, unmark |
 | `v` / `V` | visual mode: moving the cursor marks every row from where you pressed `v`; `v`, `V`, or `Esc` stops and keeps the marks |
 | `yy` `dd` `pp` | copy, cut, paste (also `Ctrl-c` `Ctrl-x` `Ctrl-v`) |
@@ -63,11 +66,10 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `zh` / `Ctrl-h` | toggle hidden files |
 | `sn` `ss` `sm` `se` `sr` | sort by name, size, modified, extension; reverse |
 | `J` `K` | scroll the preview |
-| `:` | command line with completion |
 | `!` | run a shell command here; marked files are `"$@"` |
 | `T` | terminal in this folder |
 | `w` | tasks: progress of copies and moves (`x` cancels) |
-| `Alt-Enter` | properties, including total folder size |
+| `Alt-Enter` | properties under the preview, following the cursor (again, or `Esc`, closes) |
 | `Ctrl-n` | new window here |
 | `Ctrl-=` `Ctrl--` | zoom |
 
@@ -75,6 +77,33 @@ Marks persist across folders and tabs, so you can collect files from several
 places and then copy, trash, or drag them together. Visual mode ends when you
 leave the folder or run a command such as `yy` or `dD`, which then acts on
 everything marked.
+
+## Palette, search, and properties
+
+`Ctrl-k` opens the command palette. Each row is a command: what it does, its
+name, and every key bound to it. Bindings that carry arguments, such as
+`sn` (`sort name`), get rows of their own. Typing searches descriptions,
+names and keys. Type a command with arguments (`cd ~/notes`, `set hidden true`,
+`sort size`) and `Enter` runs it as typed; `Tab` completes paths and options.
+A command that needs arguments fills in its name and waits for them. The
+`command` and `help` commands open the same palette, so either can be mapped
+to another key.
+
+`/` opens a search line above the status bar. Matches light up in the folder
+as you type, and the line shows which match you're on, such as "3 of 41". `Enter`
+keeps the search for `n` and `N`; `Esc` puts the cursor back. Text with `*`,
+`?` or `[` is a glob that has to match the whole name, so `*.md` finds
+Markdown files and `file?.txt` finds `file2.txt` but not `file10.txt`. An
+uppercase letter makes the match case sensitive. The filter (`f`) takes the
+same text and globs.
+
+`Alt-Enter` docks a properties shelf under the preview with the size,
+modification and creation times, permissions and owner, location, and link
+target. Folder totals are counted in the background and fill in as the count
+runs. With
+several items marked it shows their count and total size. It follows the
+cursor until you press `Alt-Enter` again, or `Esc` when there is nothing
+else to clear.
 
 ## Undo, trash, and bulk rename
 
