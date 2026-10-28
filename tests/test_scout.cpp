@@ -5,6 +5,7 @@
 #include "fileops.h"
 #include "fuzzy.h"
 #include "keymap.h"
+#include "launcher.h"
 #include "mainwindow.h"
 #include "service.h"
 #include "theme.h"
@@ -16,6 +17,7 @@
 #include <QFile>
 #include <QMenu>
 #include <QMimeData>
+#include <QProcess>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -23,9 +25,13 @@
 #include <QUrl>
 
 #include <cerrno>
+#include <fcntl.h>
+#include <linux/landlock.h>
 #include <random>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace {
@@ -35,6 +41,43 @@ void writeFile(const QString &path, const QByteArray &content = "hello\n") {
     QFile f(path);
     QVERIFY(f.open(QIODevice::WriteOnly));
     f.write(content);
+}
+
+// From here on this process may only create, change or remove files below
+// `root` (and write to /dev/null), and may not exec anything. False when the
+// kernel has no Landlock.
+bool confineWritesTo(const QString &root) {
+    const long abi = syscall(SYS_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 1)
+        return false;
+    __u64 write = LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                  LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+                  LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+                  LANDLOCK_ACCESS_FS_MAKE_SYM;
+    if (abi >= 2)
+        write |= LANDLOCK_ACCESS_FS_REFER;
+    if (abi >= 3)
+        write |= LANDLOCK_ACCESS_FS_TRUNCATE;
+    landlock_ruleset_attr attr{};
+    attr.handled_access_fs = write | LANDLOCK_ACCESS_FS_EXECUTE;
+    const int ruleset = int(syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0));
+    if (ruleset < 0)
+        return false;
+    auto allow = [ruleset](const char *path, __u64 access) {
+        landlock_path_beneath_attr rule{};
+        rule.allowed_access = access;
+        rule.parent_fd = open(path, O_PATH | O_CLOEXEC);
+        const bool ok = rule.parent_fd >= 0 &&
+                        syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &rule, 0) == 0;
+        if (rule.parent_fd >= 0)
+            close(rule.parent_fd);
+        return ok;
+    };
+    const bool ok = allow(QFile::encodeName(root).constData(), write) &&
+                    allow("/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE | (abi >= 3 ? LANDLOCK_ACCESS_FS_TRUNCATE : 0)) &&
+                    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && syscall(SYS_landlock_restrict_self, ruleset, 0) == 0;
+    close(ruleset);
+    return ok;
 }
 
 } // namespace
@@ -76,6 +119,7 @@ private:
     }
 
     int m_trees = 0;
+    QList<QStringList> m_launches;
 
 private slots:
     void initTestCase() {
@@ -84,6 +128,18 @@ private slots:
         qputenv("XDG_CONFIG_HOME", (m_root.path() + QStringLiteral("/xdg-config")).toLocal8Bit());
         QDir().mkpath(m_root.path() + QStringLiteral("/xdg-data"));
         Theme::instance().init();
+        // No test starts a real program: only stand-ins the tests write under m_root run.
+        launcher::setHook([this](const QString &program, const QStringList &args, const QString &dir) {
+            m_launches << (QStringList{program} + args);
+            if (program.startsWith(m_root.path() + u'/'))
+                return QProcess::startDetached(program, args, dir);
+            return true;
+        });
+    }
+
+    void cleanupTestCase() {
+        for (const QStringList &argv : std::as_const(m_launches))
+            qInfo("launch: %s", qPrintable(argv.join(u' ')));
     }
 
     void fuzzyRanksBasenameAndBoundaries() {
@@ -738,6 +794,39 @@ private slots:
     }
 
     void visualModeSurvivesRandomUse() {
+        // Runs in a child confined to its own temporary folder, so random
+        // navigation can never act on anything outside it.
+        if (!qEnvironmentVariableIsSet("SCOUT_STRESS_CHILD")) {
+            QProcess child;
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            const QString childTmp = m_root.path() + QStringLiteral("/stress-child");
+            QVERIFY(QDir().mkpath(childTmp));
+            env.insert(QStringLiteral("SCOUT_STRESS_CHILD"), QStringLiteral("1"));
+            // The child's own temporary folder, which is all it may write to.
+            env.insert(QStringLiteral("TMPDIR"), childTmp);
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(QCoreApplication::applicationFilePath(), {QStringLiteral("visualModeSurvivesRandomUse")});
+            QVERIFY(child.waitForFinished(10 * 60 * 1000));
+            const QString output = QString::fromLocal8Bit(child.readAll());
+            for (const QString &line : output.split(u'\n'))
+                if (line.contains(QLatin1String("visual-mode checks")) || line.contains(QLatin1String("SKIP")))
+                    qInfo("child: %s", qPrintable(line.trimmed()));
+            QVERIFY2(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0, qPrintable(output));
+            if (output.contains(QLatin1String("SKIP   : ScoutTest::visualModeSurvivesRandomUse")))
+                QSKIP("Landlock is unavailable");
+            return;
+        }
+        if (!confineWritesTo(QDir::tempPath()))
+            QSKIP("Landlock is unavailable, and this test only runs confined");
+        const QString outside = QFileInfo(QDir::tempPath()).absolutePath() + QStringLiteral("/scout-landlock-probe");
+        const int probe = ::open(QFile::encodeName(outside).constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (probe >= 0) {
+            ::close(probe);
+            ::unlink(QFile::encodeName(outside).constData());
+        }
+        QVERIFY2(probe < 0 && errno == EACCES, "Landlock did not confine the test");
+
         const QString base = m_root.path() + QStringLiteral("/stress");
         for (int i = 0; i < 60; ++i)
             writeFile(base + QStringLiteral("/f%1.txt").arg(i));
@@ -842,6 +931,7 @@ private slots:
         qInfo("visual-mode checks: %d, listing refreshes: %d", visualChecks, int(refreshes.size()));
         QVERIFY(visualChecks > 300);
         QVERIFY(refreshes.size() > 100);
+        QVERIFY(m_launches.isEmpty());
     }
 
     void undoTrashMoveRenameAndCopy() {
@@ -1301,5 +1391,11 @@ private slots:
     }
 };
 
-QTEST_MAIN(ScoutTest)
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+    app.setAttribute(Qt::AA_Use96Dpi, true);
+    ScoutTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 #include "test_scout.moc"

@@ -35,6 +35,7 @@ add_library(scoutcore STATIC
   src/chooser.cpp
   src/mainwindow.cpp
   src/service.cpp
+  src/launcher.cpp
 )
 target_include_directories(scoutcore PUBLIC src)
 target_link_libraries(scoutcore PUBLIC

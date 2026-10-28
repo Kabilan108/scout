@@ -2,13 +2,13 @@
 
 #include "desktopentry.h"
 #include "fuzzy.h"
+#include "launcher.h"
 #include "theme.h"
 
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -17,7 +17,6 @@
 #include <QMenu>
 #include <QMimeDatabase>
 #include <QPointer>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QStandardPaths>
@@ -232,7 +231,7 @@ void MainWindow::buildUi() {
                 cd(e->path);
             } else {
                 cd(parentDir(e->path), e->name);
-                QDesktopServices::openUrl(QUrl::fromLocalFile(e->path));
+                launcher::openUrl(QUrl::fromLocalFile(e->path));
             }
         }
     });
@@ -590,7 +589,7 @@ void MainWindow::openTargets() {
             unhandled << it.value();
     }
     for (const QString &p : unhandled)
-        QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+        launcher::openUrl(QUrl::fromLocalFile(p));
     if (!names.isEmpty())
         message(QStringLiteral("opened with %1").arg(names.join(QStringLiteral(", "))));
 }
@@ -1771,7 +1770,7 @@ void MainWindow::registerCommands() {
         }
         QStringList args{QStringLiteral("-c"), c.args.join(u' '), QStringLiteral("scout")};
         args << targets();
-        if (QProcess::startDetached(QStringLiteral("sh"), args, m_cwd))
+        if (launcher::startDetached(QStringLiteral("sh"), args, m_cwd))
             message(QStringLiteral("started: %1").arg(c.args.join(u' ')));
         else
             error(QStringLiteral("could not start sh"));
@@ -1782,14 +1781,14 @@ void MainWindow::registerCommands() {
             error(QStringLiteral("no terminal found; set $TERMINAL"));
             return;
         }
-        QProcess::startDetached(term, terminalArgsForDirectory(term, m_cwd), m_cwd);
+        launcher::startDetached(term, terminalArgsForDirectory(term, m_cwd), m_cwd);
     });
     cmd(QStringLiteral("tasks"), QStringLiteral("Show copy, move and delete progress"), [this](const CommandContext &) { showTasks(); });
     cmd(QStringLiteral("properties"), QStringLiteral("Show details and total size"), [this](const CommandContext &) { showProperties(); });
     cmd(QStringLiteral("help"), QStringLiteral("List key bindings"), [this](const CommandContext &) { showHelp(); });
     cmd(QStringLiteral("new-window"), QStringLiteral("Open another window here"), [this](const CommandContext &) {
         const QStringList args = QCoreApplication::arguments();
-        QProcess::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd});
+        launcher::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd}, {});
     });
     cmd(QStringLiteral("new-tab"), QStringLiteral("Open a tab here (or at a path)"), [this](const CommandContext &c) {
         newTab(c.args.isEmpty() ? m_cwd : c.args.join(u' '));
@@ -2336,7 +2335,7 @@ void MainWindow::startBulkRename(const QStringList &paths) {
         }
         argv = QStringList{term} + terminalExecArgs(term) + argv;
     }
-    if (!QProcess::startDetached(argv.first(), argv.mid(1), m_cwd)) {
+    if (!launcher::startDetached(argv.first(), argv.mid(1), m_cwd)) {
         error(QStringLiteral("could not start %1").arg(argv.first()));
         return;
     }
