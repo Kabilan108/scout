@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QFileSystemWatcher>
 #include <QFont>
+#include <QList>
 #include <QObject>
 #include <QString>
 
@@ -15,10 +16,10 @@ struct Palette {
     QColor mantle;    // side columns
     QColor crust;     // deepest background
     QColor surface;   // selection fill
-    QColor overlay;   // borders
+    QColor overlay;   // borders and rules; never text
     QColor text;
-    QColor subtext;   // secondary text
-    QColor muted;     // tertiary text
+    QColor subtext;   // secondary text, readable on base, mantle and surface
+    QColor muted;     // tertiary text, readable on base and mantle only
     QColor accent;    // directories, focus
     QColor red;
     QColor green;
@@ -30,6 +31,26 @@ struct Palette {
     static Palette mocha();
     static Palette latte();
     static Palette fromBase16(const QJsonObject &scheme, const QString &name);
+
+    // Backgrounds behind highlighted search matches and mode badges.
+    QColor searchTint(const QColor &bg) const { return mix(bg, yellow, 0.16); }
+    QColor badgeTint(const QColor &bg, const QColor &color) const { return mix(bg, color, 0.16); }
+
+    // Every color that is drawn as text, paired with each background it is drawn on.
+    struct TextRole {
+        QString name;
+        QColor fg;
+        QColor bg;
+    };
+    QList<TextRole> textRoles() const;
+
+    static QColor mix(const QColor &a, const QColor &b, double t);
+    static double contrast(const QColor &a, const QColor &b);
+    // `fg` moved toward `toward` just far enough to reach `ratio` against every background.
+    static QColor readable(const QColor &fg, const QList<QColor> &backgrounds, const QColor &toward, double ratio = 4.6);
+
+private:
+    void ensureContrast();
 };
 
 enum class ThemeMode { Auto, Dark, Light };

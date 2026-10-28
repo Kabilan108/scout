@@ -14,6 +14,8 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMenu>
 #include <QMimeData>
 #include <QSignalSpy>
@@ -384,6 +386,26 @@ private slots:
         QCoreApplication::processEvents();
         QVERIFY(backgroundLightness() < 0.3);
     }
+
+    void textMeetsContrastInEveryTheme() {
+        const QJsonObject stylix = QJsonDocument::fromJson(R"({
+            "base00": "1e1e2e", "base01": "181825", "base02": "313244", "base03": "45475a",
+            "base04": "585b70", "base05": "cdd6f4", "base06": "f5e0dc", "base07": "b4befe",
+            "base08": "f38ba8", "base09": "fab387", "base0A": "f9e2af", "base0B": "a6e3a1",
+            "base0C": "94e2d5", "base0D": "89b4fa", "base0E": "cba6f7", "base0F": "f2cdcd"})").object();
+        QVERIFY(!stylix.isEmpty());
+        for (const Palette &p : {Palette::fromBase16(stylix, QStringLiteral("stylix")), Palette::mocha(), Palette::latte()}) {
+            for (const Palette::TextRole &role : p.textRoles()) {
+                const double ratio = Palette::contrast(role.fg, role.bg);
+                QVERIFY2(ratio >= 4.5, qPrintable(QStringLiteral("%1: %2 %3 on %4 is %5:1")
+                                                      .arg(p.name, role.name, role.fg.name(), role.bg.name())
+                                                      .arg(ratio, 0, 'f', 2)));
+            }
+        }
+        // Decorations keep the scheme's own colors.
+        QCOMPARE(Palette::fromBase16(stylix, {}).overlay, QColor(QStringLiteral("#45475a")));
+    }
+
 
     void deleteNeverFollowsSymlinks() {
         const QString base = makeTree();

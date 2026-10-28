@@ -14,6 +14,8 @@
 #include <QStyle>
 #include <QStyleFactory>
 
+#include <cmath>
+
 namespace {
 
 QColor hex(const char *s) { return QColor(QString::fromLatin1(s)); }
@@ -32,6 +34,70 @@ int unwrapScheme(QVariant v) {
 
 QString cssColor(const QColor &c) {
     return QStringLiteral("rgba(%1,%2,%3,%4)").arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alphaF());
+}
+
+QColor Palette::mix(const QColor &a, const QColor &b, double t) {
+    return QColor::fromRgbF(float(a.redF() + (b.redF() - a.redF()) * t), float(a.greenF() + (b.greenF() - a.greenF()) * t),
+                            float(a.blueF() + (b.blueF() - a.blueF()) * t));
+}
+
+double Palette::contrast(const QColor &a, const QColor &b) {
+    auto luminance = [](const QColor &c) {
+        auto channel = [](double v) { return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) + 0.0722 * channel(c.blueF());
+    };
+    const double la = luminance(a), lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+QColor Palette::readable(const QColor &fg, const QList<QColor> &backgrounds, const QColor &toward, double ratio) {
+    auto ok = [&](const QColor &c) {
+        return std::all_of(backgrounds.begin(), backgrounds.end(), [&](const QColor &bg) { return contrast(c, bg) >= ratio; });
+    };
+    for (int step = 0; step <= 50; ++step) {
+        const QColor c = mix(fg, toward, step / 50.0);
+        if (ok(c))
+            return c;
+    }
+    return toward;
+}
+
+// base16 schemes often use base03/base04 for comments and line numbers, which
+// is too faint for interface text, and light schemes have pale accents.
+void Palette::ensureContrast() {
+    const QColor ink = dark ? QColor(Qt::white) : QColor(Qt::black);
+    const QList<QColor> all = {base, mantle, surface};
+    text = readable(text, all, ink);
+    subtext = readable(subtext, all, text);
+    muted = readable(muted, {base, mantle}, text);
+    for (QColor *c : {&accent, &red, &green, &orange, &cyan})
+        *c = readable(*c, all, ink);
+    // The tinted backgrounds depend on the color itself, so settle it in a few rounds.
+    for (int i = 0; i < 3; ++i) {
+        yellow = readable(yellow, {base, mantle, surface, searchTint(base), searchTint(surface)}, ink);
+        magenta = readable(magenta, {base, mantle, surface, badgeTint(base, magenta)}, ink);
+    }
+}
+
+QList<Palette::TextRole> Palette::textRoles() const {
+    QList<TextRole> roles;
+    const QList<QPair<QString, QColor>> backgrounds = {{QStringLiteral("base"), base},
+                                                       {QStringLiteral("mantle"), mantle},
+                                                       {QStringLiteral("surface"), surface}};
+    const QList<QPair<QString, QColor>> everywhere = {
+        {QStringLiteral("text"), text},   {QStringLiteral("subtext"), subtext}, {QStringLiteral("accent"), accent},
+        {QStringLiteral("yellow"), yellow}, {QStringLiteral("red"), red},       {QStringLiteral("green"), green},
+        {QStringLiteral("orange"), orange}, {QStringLiteral("magenta"), magenta}, {QStringLiteral("cyan"), cyan},
+    };
+    for (const auto &[fgName, fg] : everywhere)
+        for (const auto &[bgName, bg] : backgrounds)
+            roles.append({fgName + QStringLiteral(" on ") + bgName, fg, bg});
+    roles.append({QStringLiteral("muted on base"), muted, base});
+    roles.append({QStringLiteral("muted on mantle"), muted, mantle});
+    roles.append({QStringLiteral("search match on base"), yellow, searchTint(base)});
+    roles.append({QStringLiteral("search match on cursor row"), yellow, searchTint(surface)});
+    roles.append({QStringLiteral("mode badge"), magenta, badgeTint(base, magenta)});
+    return roles;
 }
 
 Palette Palette::mocha() {
@@ -53,6 +119,7 @@ Palette Palette::mocha() {
     p.orange = hex("#fab387");
     p.magenta = hex("#cba6f7");
     p.cyan = hex("#94e2d5");
+    p.ensureContrast();
     return p;
 }
 
@@ -75,6 +142,7 @@ Palette Palette::latte() {
     p.orange = hex("#fe640b");
     p.magenta = hex("#8839ef");
     p.cyan = hex("#179299");
+    p.ensureContrast();
     return p;
 }
 
@@ -94,8 +162,8 @@ Palette Palette::fromBase16(const QJsonObject &scheme, const QString &name) {
     p.surface = c("base02");
     p.overlay = c("base03");
     p.text = c("base05");
-    p.subtext = c("base04");
-    p.muted = c("base03");
+    p.subtext = mix(c("base04"), p.text, 0.5);
+    p.muted = c("base04");
     p.red = c("base08");
     p.orange = c("base09");
     p.yellow = c("base0A");
@@ -103,11 +171,7 @@ Palette Palette::fromBase16(const QJsonObject &scheme, const QString &name) {
     p.cyan = c("base0C");
     p.accent = c("base0D");
     p.magenta = c("base0E");
-    // base04 is often too close to base03 in light schemes; nudge it toward text.
-    if (!p.dark)
-        p.subtext = QColor::fromRgbF((p.subtext.redF() + p.text.redF()) / 2,
-                                     (p.subtext.greenF() + p.text.greenF()) / 2,
-                                     (p.subtext.blueF() + p.text.blueF()) / 2);
+    p.ensureContrast();
     return p;
 }
 

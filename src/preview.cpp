@@ -183,7 +183,7 @@ void ImageView::paintEvent(QPaintEvent *) {
         p.setRenderHint(QPainter::SmoothPixmapTransform);
         p.drawImage(target, m_image);
     }
-    p.setPen(pal.muted);
+    p.setPen(pal.subtext);
     p.drawText(QRect(10, height() - fm.height() - 12, width() - 20, fm.height() + 4), Qt::AlignCenter,
                fm.elidedText(m_caption, Qt::ElideMiddle, width() - 20));
 }
