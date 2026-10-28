@@ -518,6 +518,24 @@ private slots:
         QCOMPARE(currentName(w), QStringLiteral("notes.md"));
     }
 
+    void nameMatcherTakesSubstringsAndGlobs() {
+        QVERIFY(NameMatcher(QStringLiteral("not")).matches(QStringLiteral("Notes.md")));
+        QVERIFY(!NameMatcher(QStringLiteral("Not")).matches(QStringLiteral("notes.md")));
+        QCOMPARE(NameMatcher(QStringLiteral("te")).span(QStringLiteral("notes.md")), (QPair<int, int>{2, 2}));
+        const NameMatcher png(QStringLiteral("*.png"));
+        QVERIFY(png.isGlob());
+        QVERIFY(png.matches(QStringLiteral("cat.png")));
+        QVERIFY(png.matches(QStringLiteral("CAT.PNG")));
+        QVERIFY(!png.matches(QStringLiteral("cat.png.txt")));
+        QCOMPARE(png.span(QStringLiteral("cat.png")), (QPair<int, int>{0, 7}));
+        QVERIFY(!NameMatcher(QStringLiteral("*.PNG")).matches(QStringLiteral("cat.png")));
+        QVERIFY(NameMatcher(QStringLiteral("file?.txt")).matches(QStringLiteral("file2.txt")));
+        QVERIFY(!NameMatcher(QStringLiteral("file?.txt")).matches(QStringLiteral("file10.txt")));
+        QVERIFY(NameMatcher(QStringLiteral("[ab]*")).matches(QStringLiteral("beta")));
+        QVERIFY(!NameMatcher(QStringLiteral("[ab")).matches(QStringLiteral("[ab")));
+    }
+
+
     void crossDeviceMoveCopiesThenRemoves() {
         struct stat shm {}, root {};
         if (stat("/dev/shm", &shm) != 0 || stat(QFile::encodeName(m_root.path()).constData(), &root) != 0 ||

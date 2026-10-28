@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QFileSystemWatcher>
+#include <QRegularExpression>
 #include <QSet>
 #include <QString>
 #include <QTimer>
@@ -43,6 +44,27 @@ int naturalCompare(QStringView a, QStringView b);
 FileEntry statEntry(const QString &path);
 QVector<FileEntry> listDirectory(const QString &path, QString *error);
 void sortEntries(QVector<FileEntry> &entries, const ViewOptions &options);
+
+// What `/` and `f` match against names: a smartcase substring, or, when the
+// text has * ? or [, a glob that must match the whole name ("*.png").
+class NameMatcher {
+public:
+    NameMatcher() = default;
+    explicit NameMatcher(const QString &pattern);
+    QString pattern() const { return m_pattern; }
+    bool isEmpty() const { return m_pattern.isEmpty(); }
+    bool isGlob() const { return m_glob; }
+    bool matches(const QString &name) const { return span(name).second > 0; }
+    // Start and length of the matched part of `name`, the whole name for a
+    // glob; length 0 when it doesn't match.
+    QPair<int, int> span(const QString &name) const;
+
+private:
+    QString m_pattern;
+    bool m_glob = false;
+    Qt::CaseSensitivity m_case = Qt::CaseInsensitive;
+    QRegularExpression m_regex;
+};
 
 // Paths marked for a bulk operation. Marks persist across directories.
 class Marks : public QObject {

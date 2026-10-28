@@ -373,15 +373,32 @@ void DirModel::setFileFilter(std::function<bool(const FileEntry &)> accept) {
     emit refreshed();
 }
 
+NameMatcher::NameMatcher(const QString &pattern) : m_pattern(pattern) {
+    m_case = std::any_of(pattern.begin(), pattern.end(), [](QChar c) { return c.isUpper(); }) ? Qt::CaseSensitive
+                                                                                               : Qt::CaseInsensitive;
+    m_glob = pattern.contains(u'*') || pattern.contains(u'?') || pattern.contains(u'[');
+    if (m_glob)
+        m_regex = QRegularExpression::fromWildcard(pattern, m_case);
+}
+
+QPair<int, int> NameMatcher::span(const QString &name) const {
+    if (m_pattern.isEmpty())
+        return {0, 0};
+    if (m_glob)
+        return m_regex.isValid() && m_regex.match(name).hasMatch() ? QPair<int, int>{0, int(name.size())} : QPair<int, int>{0, 0};
+    const int at = int(name.indexOf(m_pattern, 0, m_case));
+    return at < 0 ? QPair<int, int>{0, 0} : QPair<int, int>{at, int(m_pattern.size())};
+}
+
 void DirModel::rebuildRows() {
     m_rows.clear();
     m_rows.reserve(m_all.size());
-    const bool caseSensitive = std::any_of(m_filter.begin(), m_filter.end(), [](QChar c) { return c.isUpper(); });
+    const NameMatcher filter(m_filter);
     for (int i = 0; i < m_all.size(); ++i) {
         const FileEntry &e = m_all[i];
         if (!m_options.showHidden && e.isHidden())
             continue;
-        if (!m_filter.isEmpty() && !e.name.contains(m_filter, caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive))
+        if (!filter.isEmpty() && !filter.matches(e.name))
             continue;
         if (m_fileFilter && !e.isDir && !m_fileFilter(e))
             continue;
