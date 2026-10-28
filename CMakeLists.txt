@@ -7,6 +7,12 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SCOUT_PLUGIN_DIRS "" CACHE STRING "Extra Qt plugin directories baked into the binary (semicolon separated)")
+option(SCOUT_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(SCOUT_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent Test)
 find_package(KF6SyntaxHighlighting REQUIRED)

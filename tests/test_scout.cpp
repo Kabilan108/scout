@@ -23,6 +23,7 @@
 #include <QUrl>
 
 #include <cerrno>
+#include <random>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -734,6 +735,113 @@ private slots:
         QVERIFY(!w.isVisualMode());
         QCOMPARE(w.marks()->size(), 2);
         QVERIFY(!marked("beta"));
+    }
+
+    void visualModeSurvivesRandomUse() {
+        const QString base = m_root.path() + QStringLiteral("/stress");
+        for (int i = 0; i < 60; ++i)
+            writeFile(base + QStringLiteral("/f%1.txt").arg(i));
+        for (int d = 0; d < 4; ++d)
+            for (int i = 0; i < 15; ++i)
+                writeFile(base + QStringLiteral("/dir%1/g%2").arg(d).arg(i));
+        MainWindow w(base, false);
+        w.resize(900, 500);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+
+        bool seeded = false;
+        const int seed = qEnvironmentVariableIntValue("SCOUT_STRESS_SEED", &seeded);
+        std::mt19937 rng(seeded ? seed : 20261028);
+        auto pick = [&rng](int n) { return int(std::uniform_int_distribution<int>(0, n - 1)(rng)); };
+        static const char *motions[] = {"j", "k", "G", "gg", "5j", "3k", "12j", "2G"};
+        int created = 0;
+        int visualChecks = 0;
+        QSignalSpy refreshes(w.currentModel(), &DirModel::refreshed);
+        auto touchFiles = [&] {
+            const QString dir = base + (pick(2) ? QString() : QStringLiteral("/dir%1").arg(pick(4)));
+            if (pick(2)) {
+                writeFile(dir + QStringLiteral("/new%1").arg(++created));
+                return;
+            }
+            QString err;
+            const QVector<FileEntry> entries = listDirectory(dir, &err);
+            const FileEntry *victim = entries.isEmpty() ? nullptr : &entries[pick(int(entries.size()))];
+            if (victim && !victim->isDir)
+                QFile::remove(victim->path);
+        };
+        // Things that end visual mode, kept rarer so most steps run inside it.
+        auto leaveVisual = [&] {
+            switch (pick(8)) {
+            case 0: key(w, Qt::Key_Space); break;
+            case 1: {
+                // Never above `base`, and never `l` on a file, which would launch its app.
+                const FileEntry *e = w.currentEntry();
+                if (e && e->isDir && (pick(3) || w.cwd() == base))
+                    keys(w, QStringLiteral("l"));
+                else if (w.cwd() != base)
+                    keys(w, QStringLiteral("h"));
+                break;
+            }
+            case 2: keys(w, QStringLiteral("H")); break;
+            case 3:
+                if (w.tabCount() < 4 && pick(2))
+                    w.runCommandLine(QStringLiteral("new-tab"));
+                else if (w.tabCount() > 1 && pick(2))
+                    w.runCommandLine(QStringLiteral("close-tab"));
+                else
+                    w.runCommandLine(QStringLiteral("next-tab"));
+                break;
+            case 4: w.runCommandLine(pick(2) ? QStringLiteral("invert-marks") : QStringLiteral("unmark-all")); break;
+            case 5: key(w, Qt::Key_Escape); break;
+            case 6: w.runCommandLine(QStringLiteral("reload")); break;
+            default: keys(w, QStringLiteral("V")); break;
+            }
+        };
+        for (int step = 0; step < 3000; ++step) {
+            switch (pick(20)) {
+            case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+                keys(w, QLatin1String(motions[pick(int(std::size(motions)))]));
+                break;
+            case 8:
+                key(w, pick(2) ? Qt::Key_D : Qt::Key_U, Qt::ControlModifier);
+                break;
+            case 9: case 10:
+                if (!w.isVisualMode())
+                    keys(w, pick(2) ? QStringLiteral("v") : QStringLiteral("V"));
+                break;
+            case 11:
+                w.currentModel()->setFilter(pick(2) ? QString() : QString::number(pick(10)));
+                break;
+            case 12:
+                // What the folder watcher does when something changes.
+                w.currentModel()->reload();
+                break;
+            case 13: case 14:
+                touchFiles();
+                break;
+            case 15:
+                leaveVisual();
+                break;
+            default:
+                QTest::qWait(pick(25));
+                break;
+            }
+            QCoreApplication::processEvents();
+            QVERIFY2(w.cwd() == base || w.cwd().startsWith(base + u'/'), qPrintable(w.cwd()));
+            QVERIFY(w.isVisible());
+            QVERIFY(w.tabCount() >= 1);
+            QVERIFY(w.cursorRow() < w.currentModel()->rowCount());
+            DirModel *model = w.currentModel();
+            if (w.isVisualMode() && model->isLoaded() && !model->isLoading() && model->path() == w.cwd()) {
+                if (const FileEntry *e = w.currentEntry()) {
+                    QVERIFY2(w.marks()->contains(e->path), qPrintable(QStringLiteral("step %1: %2").arg(step).arg(e->path)));
+                    ++visualChecks;
+                }
+            }
+        }
+        qInfo("visual-mode checks: %d, listing refreshes: %d", visualChecks, int(refreshes.size()));
+        QVERIFY(visualChecks > 300);
+        QVERIFY(refreshes.size() > 100);
     }
 
     void undoTrashMoveRenameAndCopy() {
