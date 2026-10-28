@@ -222,16 +222,40 @@ void EntryDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         nameColor = pal.red;
     else if (e->isSymlink)
         nameColor = pal.cyan;
+    const QColor rowBg = isCurrent ? pal.surface : (view && view->role() == ColumnView::Role::Parent ? pal.mantle : pal.base);
+    // Dimmed, but never below readable contrast.
     if (e->isHidden() && !marked)
-        nameColor.setAlphaF(0.65);
+        nameColor = Palette::readable(Palette::mix(nameColor, rowBg, 0.35), {rowBg}, nameColor);
 
     const QRectF textRect(row.left() + 14 + iconSize, row.top(), row.width() - 20 - iconSize - rightWidth, row.height());
+    const QString shown = fm.elidedText(e->name, Qt::ElideMiddle, int(textRect.width()));
     painter->setFont(option.font);
-    painter->setPen(nameColor);
-    painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft,
-                      fm.elidedText(e->name, Qt::ElideMiddle, int(textRect.width())));
+    const QPair<int, int> hit = view ? view->highlight().span(e->name) : QPair<int, int>{0, 0};
+    if (hit.second > 0) {
+        // Highlight just the match when the name is shown whole, else all of it.
+        const bool whole = shown != e->name;
+        const int start = whole ? 0 : hit.first;
+        const int length = whole ? int(shown.size()) : hit.second;
+        const qreal x = textRect.left() + fm.horizontalAdvance(shown.left(start));
+        const qreal w = fm.horizontalAdvance(shown.mid(start, length));
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(pal.searchTint(rowBg));
+        painter->drawRoundedRect(QRectF(x - 2, row.top() + 3, w + 4, row.height() - 6), 3, 3);
+        const QString before = shown.left(start);
+        const QString match = shown.mid(start, length);
+        painter->setPen(nameColor);
+        painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, before);
+        painter->setPen(pal.yellow);
+        painter->drawText(textRect.adjusted(x - textRect.left(), 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, match);
+        painter->setPen(nameColor);
+        painter->drawText(textRect.adjusted(x + w - textRect.left(), 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                          shown.mid(start + length));
+    } else {
+        painter->setPen(nameColor);
+        painter->drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, shown);
+    }
     if (!right.isEmpty()) {
-        painter->setPen(pal.muted);
+        painter->setPen(pal.subtext);
         painter->drawText(QRectF(row.right() - rightWidth - 4, row.top(), rightWidth, row.height()),
                           Qt::AlignVCenter | Qt::AlignRight, right);
     }
@@ -293,6 +317,11 @@ void ColumnView::setCurrentRow(int row) {
             target += r.bottom() - (viewport()->height() - margin);
         verticalScrollBar()->setValue(target);
     }
+}
+
+void ColumnView::setHighlight(const NameMatcher &matcher) {
+    m_highlight = matcher;
+    viewport()->update();
 }
 
 int ColumnView::visibleRows() const { return std::max(1, viewport()->height() / Theme::instance().rowHeight()); }
@@ -423,7 +452,7 @@ void ColumnView::paintEvent(QPaintEvent *event) {
     if (m_model->rowCount() > 0 || m_model->path().isEmpty() || (!m_model->isLoaded() && m_model->isLoading()))
         return;
     QPainter p(viewport());
-    p.setPen(m_model->error().isEmpty() ? Theme::p().muted : Theme::p().red);
+    p.setPen(m_model->error().isEmpty() ? Theme::p().subtext : Theme::p().red);
     QString message = m_model->error();
     if (message.isEmpty())
         message = m_model->filter().isEmpty() ? (m_model->totalCount() > 0 ? QStringLiteral("only hidden files")

@@ -6,6 +6,7 @@
 #include <QTimer>
 #include <QWidget>
 
+#include <atomic>
 #include <memory>
 
 #include "chooser.h"
@@ -49,7 +50,10 @@ public:
     Prompt *prompt() const { return m_prompt; }
     PickerList *picker() const { return m_picker; }
     StatusBar *statusBar() const { return m_status; }
+    HeaderBar *headerBar() const { return m_header; }
     WhichKey *whichKey() const { return m_whichKey; }
+    KeyMapSheet *keyMapSheet() const { return m_keySheet; }
+    PropertiesShelf *propertiesShelf() const { return m_shelf; }
     bool isVisualMode() const { return m_visual; }
     TaskManager *tasks() { return &m_tasks; }
     Marks *marks() { return &m_marks; }
@@ -85,7 +89,7 @@ protected:
     void showEvent(QShowEvent *event) override;
 
 private:
-    enum class Overlay { None, Tasks, Properties };
+    enum class Overlay { None, Tasks, KeyMap };
 
     struct Tab {
         QString cwd;
@@ -137,8 +141,10 @@ private:
     void endVisual();
     void updateVisual();
     void showTasks();
-    void showProperties();
+    void showKeyMap();
     void closeOverlay();
+    void toggleProperties();
+    void updateProperties();
 
     void yank(bool cut);
     void paste(Task::Kind kind);
@@ -147,16 +153,19 @@ private:
     void promptRename();
     void promptCreate(const QString &initial = {});
     void createPath(const QString &input);
+    void confirm(const QString &title, const QString &meta, const QList<PickerItem> &items, const QString &body,
+                 const QString &yes, std::function<void()> accept, std::function<void()> reject);
     void confirmDelete();
     void promptFilter();
     void promptSearch(bool backwards = false);
     void searchNext(int direction);
+    QString searchPosition(const NameMatcher &matcher) const;
     void promptCommand(const QString &initial = {});
     void updateCommandList(const QString &text);
+    QList<PickerItem> commandItems(const QString &query) const;
     void promptShell();
     void promptFind();
     void updateFinderList();
-    void showHelp();
     void showContextMenu(int row, const QPoint &globalPos);
     void openPrompt(PromptSpec spec);
 
@@ -189,15 +198,19 @@ private:
     ColumnView *m_parentView = nullptr;
     ColumnView *m_currentView = nullptr;
     Preview *m_preview = nullptr;
+    QWidget *m_previewPane = nullptr;
+    PropertiesShelf *m_shelf = nullptr;
     QSplitter *m_splitter = nullptr;
     HeaderBar *m_header = nullptr;
-    QStackedWidget *m_bottom = nullptr;
+    QWidget *m_bottom = nullptr;
+    QWidget *m_promptSpace = nullptr;
     StatusBar *m_status = nullptr;
     Prompt *m_prompt = nullptr;
     PickerList *m_picker = nullptr;
+    Scrim *m_scrim = nullptr;
     WhichKey *m_whichKey = nullptr;
     TasksView *m_tasksView = nullptr;
-    PropertiesView *m_properties = nullptr;
+    KeyMapSheet *m_keySheet = nullptr;
     Overlay m_overlay = Overlay::None;
     bool m_showPreview = true;
 
@@ -211,7 +224,18 @@ private:
     QString m_search;
     bool m_searchBackwards = false;
     ClipboardFiles m_register;
-    QString m_propertiesPath;
+
+    // Properties shelf; folder sizes are counted on a worker thread.
+    struct SizeCount {
+        std::atomic_bool cancel = false;
+        std::atomic_bool done = false;
+        std::atomic<qint64> bytes = 0;
+        std::atomic<int> children = -1;
+    };
+    bool m_propertiesOpen = false;
+    QString m_propertiesKey;
+    std::shared_ptr<SizeCount> m_sizeCount;
+    QTimer m_sizeTimer;
 
     // Visual mode: marks are the ones from before plus anchor..cursor.
     bool m_visual = false;

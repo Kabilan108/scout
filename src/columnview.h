@@ -39,6 +39,9 @@ public:
     int currentRow() const { return currentIndex().row(); }
     void setCurrentRow(int row);
     int visibleRows() const;
+    // Search matches shown in the names.
+    void setHighlight(const NameMatcher &matcher);
+    const NameMatcher &highlight() const { return m_highlight; }
 
 signals:
     void dropRequested(const QStringList &paths, const QString &targetDir, Qt::DropAction action);
@@ -67,4 +70,5 @@ private:
     Role m_role;
     bool m_showCursor = false;
     int m_pressedRow = -1;
+    NameMatcher m_highlight;
 };

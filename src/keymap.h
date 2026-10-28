@@ -41,6 +41,7 @@ public:
     bool hasPendingKeys() const { return !m_pending.isEmpty(); }
     bool hasAmbiguousExact() const;
     QString pendingDisplay() const;
+    QStringList pendingKeys() const { return m_pending; }
     QList<Continuation> continuations() const;
     QList<Binding> bindings() const { return m_bindings.values(); }
     QString keysFor(const QString &command) const;

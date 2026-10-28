@@ -14,6 +14,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QKeyEvent>
+#include <QLocale>
 #include <QMenu>
 #include <QMimeDatabase>
 #include <QPointer>
@@ -23,6 +24,7 @@
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QThreadPool>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrent>
@@ -78,18 +80,62 @@ QString renamePath(const QString &from, const QString &to) {
     return err == 0 ? QString() : QStringLiteral("rename failed: %1").arg(QString::fromLocal8Bit(strerror(err)));
 }
 
-qint64 treeSize(const QString &path) {
-    struct stat st {};
-    const QByteArray enc = QFile::encodeName(path);
-    if (lstat(enc.constData(), &st) != 0)
-        return 0;
-    if (!S_ISDIR(st.st_mode))
-        return S_ISREG(st.st_mode) ? st.st_size : 0;
-    qint64 total = 0;
+// Adds up the regular files below `path`, never following symlinks.
+void countTree(const QString &path, bool top, std::atomic<qint64> &bytes, const std::atomic_bool &cancel) {
+    if (top) {
+        struct stat st {};
+        if (lstat(QFile::encodeName(path).constData(), &st) != 0)
+            return;
+        if (!S_ISDIR(st.st_mode)) {
+            if (S_ISREG(st.st_mode))
+                bytes += st.st_size;
+            return;
+        }
+    }
     QString err;
-    for (const FileEntry &e : listDirectory(path, &err))
-        total += e.isSymlink ? 0 : treeSize(e.path);
-    return total;
+    for (const FileEntry &e : listDirectory(path, &err)) {
+        if (cancel)
+            return;
+        if (e.isSymlink)
+            continue;
+        if (e.isDir)
+            countTree(e.path, false, bytes, cancel);
+        else if (e.isRegular)
+            bytes += e.size;
+    }
+}
+
+qint64 birthTime(const QString &path) {
+    struct statx sx {};
+    if (statx(AT_FDCWD, QFile::encodeName(path).constData(), 0, STATX_BTIME, &sx) != 0 || !(sx.stx_mask & STATX_BTIME))
+        return -1;
+    return sx.stx_btime.tv_sec;
+}
+
+QString sizeWithBytes(qint64 bytes) {
+    return QStringLiteral("%1 (%2 bytes)").arg(humanSize(bytes), QLocale().toString(bytes));
+}
+
+// Every binding, letters first ("h" before "-" before "<Left>"), then arrows, then the rest; short before long.
+QList<Binding> bindingsByKeys(const KeyMap &keys) {
+    QList<Binding> bindings = keys.bindings();
+    auto rank = [](const Binding &b) {
+        if (std::all_of(b.keys.begin(), b.keys.end(), [](const QString &k) { return k.size() == 1; }))
+            return b.keys.first()[0].isLetter() ? 0 : 1;
+        static const QSet<QString> arrows = {QStringLiteral("<Up>"), QStringLiteral("<Down>"), QStringLiteral("<Left>"),
+                                             QStringLiteral("<Right>")};
+        return b.keys.size() == 1 && arrows.contains(b.keys.first()) ? 2 : 3;
+    };
+    std::stable_sort(bindings.begin(), bindings.end(), [&](const Binding &a, const Binding &b) {
+        if (rank(a) != rank(b))
+            return rank(a) < rank(b);
+        return KeyMap::display(a.keys).size() < KeyMap::display(b.keys).size();
+    });
+    return bindings;
+}
+
+QString formatStamp(qint64 secs) {
+    return QDateTime::fromSecsSinceEpoch(secs).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
 }
 
 } // namespace
@@ -127,6 +173,19 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
     m_finderTimer.setSingleShot(true);
     m_finderTimer.setInterval(80);
     connect(&m_finderTimer, &QTimer::timeout, this, &MainWindow::updateFinderList);
+    m_sizeTimer.setInterval(120);
+    connect(&m_sizeTimer, &QTimer::timeout, this, [this] {
+        if (!m_sizeCount)
+            return;
+        const bool done = m_sizeCount->done;
+        const qint64 bytes = m_sizeCount->bytes;
+        if (const int children = m_sizeCount->children; children >= 0)
+            m_shelf->updateRow(QStringLiteral("Contains"), plural(children, "item"));
+        m_shelf->updateRow(QStringLiteral("Total size"),
+                           done ? sizeWithBytes(bytes) : QStringLiteral("counting… %1 so far").arg(humanSize(bytes)));
+        if (done)
+            m_sizeTimer.stop();
+    });
     m_renamePoll.setInterval(250);
     m_tabs.append(Tab{});
 
@@ -153,6 +212,8 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
 MainWindow::~MainWindow() {
     QCoreApplication::instance()->removeEventFilter(this);
     m_walker.cancel();
+    if (m_sizeCount)
+        m_sizeCount->cancel = true;
     if (auto done = std::exchange(m_chooserDone, {}))
         done(ChooserResult{});
 }
@@ -167,34 +228,58 @@ void MainWindow::buildUi() {
     m_currentModel = new DirModel(&m_marks, this);
     m_parentView = new ColumnView(m_parentModel, ColumnView::Role::Parent, this);
     m_currentView = new ColumnView(m_currentModel, ColumnView::Role::Current, this);
-    m_preview = new Preview(&m_marks, this);
+    // The properties shelf docks under the preview and takes its space from it.
+    m_previewPane = new QWidget(this);
+    auto *paneLayout = new QVBoxLayout(m_previewPane);
+    paneLayout->setContentsMargins(0, 0, 0, 0);
+    paneLayout->setSpacing(0);
+    m_preview = new Preview(&m_marks, m_previewPane);
+    m_shelf = new PropertiesShelf(m_previewPane);
+    m_shelf->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    paneLayout->addWidget(m_preview, 1);
+    paneLayout->addStretch(0);
+    paneLayout->addWidget(m_shelf);
 
     m_splitter = new QSplitter(Qt::Horizontal, this);
     m_splitter->setHandleWidth(1);
     m_splitter->setChildrenCollapsible(false);
     m_splitter->addWidget(m_parentView);
     m_splitter->addWidget(m_currentView);
-    m_splitter->addWidget(m_preview);
+    m_splitter->addWidget(m_previewPane);
     m_splitter->setStretchFactor(0, 2);
     m_splitter->setStretchFactor(1, 5);
     m_splitter->setStretchFactor(2, 7);
     m_splitter->setSizes({160, 420, 620});
     m_splitter->setFocusPolicy(Qt::NoFocus);
 
-    m_bottom = new QStackedWidget(this);
+    // The prompt floats; in bar style it sits over this space above the status bar.
+    m_bottom = new QWidget(this);
+    auto *bottomLayout = new QVBoxLayout(m_bottom);
+    bottomLayout->setContentsMargins(0, 0, 0, 0);
+    bottomLayout->setSpacing(0);
+    m_promptSpace = new QWidget(m_bottom);
+    m_promptSpace->hide();
     m_status = new StatusBar(m_bottom);
-    m_prompt = new Prompt(m_bottom);
-    m_bottom->addWidget(m_status);
-    m_bottom->addWidget(m_prompt);
+    bottomLayout->addWidget(m_promptSpace);
+    bottomLayout->addWidget(m_status);
 
     layout->addWidget(m_header);
     layout->addWidget(m_splitter, 1);
     layout->addWidget(m_bottom);
 
+    m_scrim = new Scrim(this);
     m_picker = new PickerList(this);
+    m_prompt = new Prompt(this);
     m_whichKey = new WhichKey(this);
     m_tasksView = new TasksView(&m_tasks, this);
-    m_properties = new PropertiesView(this);
+    m_keySheet = new KeyMapSheet(this);
+
+    connect(m_scrim, &Scrim::clicked, this, [this] {
+        if (m_prompt->isOpen())
+            m_prompt->close(false);
+        else
+            closeOverlay();
+    });
 
     connect(m_header, &HeaderBar::tabClicked, this, [this](int index) {
         saveTab();
@@ -263,7 +348,8 @@ void MainWindow::buildUi() {
     connect(m_currentView, &ColumnView::contextMenuRequested, this, &MainWindow::showContextMenu);
 
     connect(m_prompt, &Prompt::closed, this, [this] {
-        m_bottom->setCurrentWidget(m_status);
+        m_promptSpace->hide();
+        m_scrim->setVisible(m_overlay != Overlay::None);
         if (m_finderActive) {
             m_finderActive = false;
             m_walker.cancel();
@@ -279,6 +365,10 @@ void MainWindow::buildUi() {
     connect(&m_tasks, &TaskManager::taskFinished, this, &MainWindow::onTaskFinished);
     connect(&m_tasks, &TaskManager::tasksChanged, this, &MainWindow::updateStatus);
     connect(&m_marks, &Marks::changed, this, &MainWindow::updateStatus);
+    connect(&m_marks, &Marks::changed, this, [this] {
+        if (m_propertiesOpen)
+            updateProperties();
+    });
     connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, [this] {
         if (!m_register.paths.isEmpty() && !QGuiApplication::clipboard()->ownsClipboard()) {
             m_register = {};
@@ -319,10 +409,15 @@ void MainWindow::applyTheme() {
     if (m_chooserBar)
         m_chooserBar->applyTheme();
     const int barHeight = Theme::instance().rowHeight() + 8;
-    m_bottom->setFixedHeight(barHeight);
+    m_status->setFixedHeight(barHeight);
+    m_promptSpace->setFixedHeight(barHeight);
     m_header->setFixedHeight(barHeight);
+    QPalette pp = m_previewPane->palette();
+    pp.setColor(QPalette::Window, pal.base);
+    m_previewPane->setPalette(pp);
+    m_previewPane->setAutoFillBackground(true);
     QPalette wp = palette();
-    wp.setColor(QPalette::Window, pal.crust);
+    wp.setColor(QPalette::Window, pal.base);
     setPalette(wp);
     setAutoFillBackground(true);
     positionOverlays();
@@ -465,6 +560,9 @@ void MainWindow::onParentRefreshed() {
 
 void MainWindow::updatePreview() {
     m_preview->setVisible(m_showPreview);
+    m_previewPane->setVisible(m_showPreview || m_propertiesOpen);
+    if (m_propertiesOpen)
+        updateProperties();
     if (!m_showPreview)
         return;
     const FileEntry *e = currentEntry();
@@ -489,38 +587,40 @@ void MainWindow::updateStatus() {
         left << permissionString(*e);
         if (!e->isDir)
             left << humanSize(e->size);
-        left << QDateTime::fromSecsSinceEpoch(e->mtime).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+        left << formatStamp(e->mtime);
         if (e->isSymlink)
             left << QStringLiteral("→ ") + e->linkTarget;
     }
     m_status->setLeft(left);
     m_status->setMode(m_visual ? QStringLiteral("VISUAL") : QString());
 
-    QStringList right;
-    if (m_keys.isPending())
-        right << m_keys.pendingDisplay();
-    if (!m_currentModel->filter().isEmpty())
-        right << QStringLiteral("filter: %1").arg(m_currentModel->filter());
+    const Palette &pal = Theme::p();
+    QList<StatusBar::Segment> right;
+    if (!m_marks.isEmpty())
+        right.append({QStringLiteral("%1 marked").arg(m_marks.size()), pal.yellow});
+    if (!m_register.paths.isEmpty())
+        right.append({QStringLiteral("%1 %2").arg(m_register.paths.size()).arg(m_register.cut ? "cut" : "copied"), pal.subtext});
     if (m_options.sort != ViewOptions::Name || m_options.reverse) {
         static const char *names[] = {"name", "size", "modified", "extension"};
-        right << QStringLiteral("sort: %1%2").arg(QLatin1String(names[m_options.sort])).arg(m_options.reverse ? " ↑" : "");
+        right.append({QStringLiteral("sort: %1%2").arg(QLatin1String(names[m_options.sort])).arg(m_options.reverse ? " ↑" : ""),
+                      pal.subtext});
     }
     if (m_options.showHidden)
-        right << QStringLiteral("hidden");
-    if (!m_marks.isEmpty())
-        right << QStringLiteral("%1 marked").arg(m_marks.size());
-    if (!m_register.paths.isEmpty())
-        right << QStringLiteral("%1 %2").arg(m_register.paths.size()).arg(m_register.cut ? "cut" : "copied");
+        right.append({QStringLiteral("hidden"), pal.subtext});
+    if (!m_currentModel->filter().isEmpty())
+        right.append({QStringLiteral("filter: %1").arg(m_currentModel->filter()), pal.subtext});
     const int active = m_tasks.activeCount();
     if (active > 0) {
         double sum = 0;
         for (Task *t : m_tasks.tasks())
             if (!t->isFinished())
                 sum += t->fraction();
-        right << QStringLiteral("%1 %2%").arg(plural(active, "task")).arg(qRound(100 * sum / active));
+        right.append({QStringLiteral("%1 %2%").arg(plural(active, "task")).arg(qRound(100 * sum / active)), pal.subtext});
     }
+    if (m_keys.isPending())
+        right.append({m_keys.pendingDisplay(), pal.yellow});
     const int count = m_currentModel->rowCount();
-    right << QStringLiteral("%1/%2").arg(count == 0 ? 0 : cursorRow() + 1).arg(count);
+    right.append({QStringLiteral("%1/%2").arg(count == 0 ? 0 : cursorRow() + 1).arg(count), pal.subtext});
     m_status->setRight(right);
     m_status->setDragItems(m_marks.size(), [this] { return m_marks.paths(); });
 }
@@ -648,12 +748,17 @@ void MainWindow::showOpenWith() {
         for (const auto &s : scored)
             items << s.second;
         m_picker->setItems(items);
-        m_picker->setHeader(QStringLiteral("open %1 with").arg(label));
+        m_picker->setHeader(QStringLiteral("Open %1 with").arg(label),
+                            query.isEmpty() ? plural(int(items.size()), "app") : QStringLiteral("%1 of %2").arg(items.size()).arg(everything.size()));
+        m_picker->setEmptyText(QStringLiteral("No applications match “%1”").arg(query),
+                               QStringLiteral("Search by the application's name"));
         m_picker->setFooter(QStringLiteral("↑↓ move · Enter open · Esc close"));
         positionOverlays();
     };
     PromptSpec spec;
-    spec.label = QStringLiteral("open with:");
+    spec.style = PromptSpec::Style::Palette;
+    spec.label = QStringLiteral("›");
+    spec.placeholder = QStringLiteral("Search applications");
     spec.showList = true;
     spec.onChange = rebuild;
     spec.onAccept = [this, paths](const QString &, const PickerItem *item) {
@@ -668,9 +773,17 @@ void MainWindow::showOpenWith() {
 void MainWindow::openPrompt(PromptSpec spec) {
     hideWhichKey();
     m_keys.reset();
-    m_bottom->setCurrentWidget(m_prompt);
+    closeOverlay();
+    const bool bar = spec.style == PromptSpec::Style::Bar;
     const bool list = spec.showList;
+    // Before open(), whose onChange positions the overlays.
+    m_promptSpace->setVisible(bar);
+    m_scrim->setVisible(!bar);
+    layout()->activate();
     m_prompt->open(std::move(spec), list ? m_picker : nullptr);
+    m_promptSpace->setVisible(bar);
+    m_scrim->setVisible(!bar);
+    layout()->activate();
     positionOverlays();
 }
 
@@ -745,9 +858,12 @@ bool MainWindow::handleEscape() {
         m_marks.clear();
     } else if (!m_search.isEmpty()) {
         m_search.clear();
+        m_currentView->setHighlight({});
     } else if (!m_register.paths.isEmpty()) {
         m_register = {};
         message(QStringLiteral("clipboard selection dropped"));
+    } else if (m_propertiesOpen) {
+        toggleProperties();
     } else {
         handled = false;
     }
@@ -761,7 +877,13 @@ void MainWindow::showWhichKey() {
         hideWhichKey();
         return;
     }
-    m_whichKey->setContinuations(m_keys.pendingDisplay(), items);
+    static const QHash<QString, QString> families = {
+        {QStringLiteral("g"), QStringLiteral("go")},          {QStringLiteral("y"), QStringLiteral("copy")},
+        {QStringLiteral("d"), QStringLiteral("cut/remove")},  {QStringLiteral("p"), QStringLiteral("paste")},
+        {QStringLiteral("s"), QStringLiteral("sort")},        {QStringLiteral("z"), QStringLiteral("view")},
+        {QStringLiteral("u"), QStringLiteral("undo/unmark")},
+    };
+    m_whichKey->setContinuations(m_keys.pendingDisplay(), families.value(m_keys.pendingKeys().join(QString())), items);
     m_whichKey->show();
     m_whichKey->raise();
     positionOverlays();
@@ -833,108 +955,282 @@ void MainWindow::handleOverlayKey(QKeyEvent *event) {
         positionOverlays();
         return;
     }
-    if (m_overlay == Overlay::Properties &&
-        (token == QLatin1String("<Esc>") || token == QLatin1String("q") || token == QLatin1String("<A-CR>") ||
-         token == QLatin1String("<CR>")))
-        closeOverlay();
+    if (m_overlay == Overlay::KeyMap) {
+        const int page = std::max(1, m_keySheet->height() / Theme::instance().rowHeight() - 4);
+        if (token == QLatin1String("j") || token == QLatin1String("<Down>"))
+            m_keySheet->scrollBy(1);
+        else if (token == QLatin1String("k") || token == QLatin1String("<Up>"))
+            m_keySheet->scrollBy(-1);
+        else if (token == QLatin1String("<C-d>") || token == QLatin1String("<PageDown>") || token == QLatin1String("<Space>"))
+            m_keySheet->scrollBy(page);
+        else if (token == QLatin1String("<C-u>") || token == QLatin1String("<PageUp>"))
+            m_keySheet->scrollBy(-page);
+        else if (token == QLatin1String("<Esc>") || token == QLatin1String("q"))
+            closeOverlay();
+    }
 }
 
 void MainWindow::closeOverlay() {
     m_overlay = Overlay::None;
     m_tasksView->hide();
-    m_properties->hide();
-    m_propertiesPath.clear();
+    m_keySheet->hide();
+    m_scrim->setVisible(m_prompt->isOpen() && m_prompt->style() != PromptSpec::Style::Bar);
 }
 
 void MainWindow::showTasks() {
     hideWhichKey();
     closeOverlay();
     m_overlay = Overlay::Tasks;
+    m_scrim->show();
     m_tasksView->show();
-    m_tasksView->raise();
     positionOverlays();
 }
 
-void MainWindow::showProperties() {
-    const QStringList paths = targets();
-    if (paths.isEmpty())
-        return;
+void MainWindow::showKeyMap() {
+    hideWhichKey();
     closeOverlay();
+    // Bindings fall into groups by the command they run, so remapped keys land where they belong.
+    static const QList<QPair<QString, QStringList>> layout = {
+        {QStringLiteral("Move"),
+         {QStringLiteral("down"), QStringLiteral("up"), QStringLiteral("leave"), QStringLiteral("enter"), QStringLiteral("top"),
+          QStringLiteral("bottom"), QStringLiteral("half-page-down"), QStringLiteral("half-page-up"), QStringLiteral("page-down"),
+          QStringLiteral("page-up"), QStringLiteral("preview-down"), QStringLiteral("preview-up")}},
+        {QStringLiteral("Go"),
+         {QStringLiteral("open"), QStringLiteral("open-with"), QStringLiteral("back"), QStringLiteral("forward"), QStringLiteral("cd"),
+          QStringLiteral("terminal"), QStringLiteral("new-window")}},
+        {QStringLiteral("Select"),
+         {QStringLiteral("toggle-mark"), QStringLiteral("visual"), QStringLiteral("mark-all"), QStringLiteral("invert-marks"),
+          QStringLiteral("unmark-all")}},
+        {QStringLiteral("Copy & move"),
+         {QStringLiteral("copy"), QStringLiteral("cut"), QStringLiteral("paste"), QStringLiteral("paste-link"),
+          QStringLiteral("copy-path"), QStringLiteral("copy-name"), QStringLiteral("copy-dir")}},
+        {QStringLiteral("Remove & undo"),
+         {QStringLiteral("trash"), QStringLiteral("delete"), QStringLiteral("undo"), QStringLiteral("restore"),
+          QStringLiteral("empty-trash")}},
+        {QStringLiteral("Change"),
+         {QStringLiteral("rename"), QStringLiteral("bulk-rename"), QStringLiteral("create"), QStringLiteral("create-folder"),
+          QStringLiteral("mkdir"), QStringLiteral("touch")}},
+        {QStringLiteral("Find"),
+         {QStringLiteral("command"), QStringLiteral("help"), QStringLiteral("find"), QStringLiteral("search"),
+          QStringLiteral("search-back"), QStringLiteral("search-next"), QStringLiteral("search-prev"), QStringLiteral("filter")}},
+        {QStringLiteral("View"),
+         {QStringLiteral("toggle-hidden"), QStringLiteral("toggle-preview"), QStringLiteral("sort"), QStringLiteral("properties"),
+          QStringLiteral("tasks"), QStringLiteral("keymap"), QStringLiteral("zoom-in"), QStringLiteral("zoom-out"),
+          QStringLiteral("reload"), QStringLiteral("set")}},
+        {QStringLiteral("Tabs"),
+         {QStringLiteral("new-tab"), QStringLiteral("next-tab"), QStringLiteral("prev-tab"), QStringLiteral("tab"),
+          QStringLiteral("close-tab"), QStringLiteral("reopen-tab"), QStringLiteral("quit")}},
+    };
+    QHash<QString, int> rank;
+    for (int g = 0; g < layout.size(); ++g)
+        for (int c = 0; c < layout[g].second.size(); ++c)
+            rank.insert(layout[g].second[c], g * 100 + c);
+
+    // One entry per command line, carrying every key bound to it.
+    struct Line {
+        QString command;
+        QStringList keys;
+        QString description;
+        int rank;
+    };
+    QList<Line> lines;
+    QHash<QString, int> byCommand;
+    const QList<Binding> bindings = bindingsByKeys(m_keys);
+    for (const Binding &b : bindings) {
+        const QStringList parts = CommandRegistry::split(b.command);
+        const QString name = parts.value(0);
+        if (!byCommand.contains(b.command)) {
+            const CommandDef *def = m_commands.find(name);
+            QString description = b.description;
+            if (description.isEmpty())
+                description = def ? def->description : b.command;
+            byCommand.insert(b.command, int(lines.size()));
+            lines.append({b.command, {}, description, rank.value(name, 100000)});
+        }
+        lines[byCommand.value(b.command)].keys << card::keyLabel(b.keys);
+    }
+    std::stable_sort(lines.begin(), lines.end(), [](const Line &a, const Line &b) { return a.rank < b.rank; });
+
+    QList<KeyMapSheet::Group> groups;
+    for (const auto &[title, commands] : layout)
+        groups.append({title, {}});
+    groups.append({QStringLiteral("Other"), {}});
+    QList<QPair<int, QString>> tabKeys;
+    for (const Line &line : lines) {
+        const QStringList parts = CommandRegistry::split(line.command);
+        // "tab 1" … "tab 9" read better as one range.
+        if (parts.size() == 2 && parts[0] == QLatin1String("tab") && line.keys.size() == 1 && parts[1].toInt() > 0) {
+            tabKeys.append({parts[1].toInt(), line.keys.first()});
+            continue;
+        }
+        const int group = line.rank >= 100000 ? int(groups.size()) - 1 : line.rank / 100;
+        groups[group].entries.append({line.keys.mid(0, 4).join(u' '), line.description});
+    }
+    std::sort(tabKeys.begin(), tabKeys.end());
+    if (tabKeys.size() >= 3)
+        groups[layout.size() - 1].entries.append(
+            {tabKeys.first().second + QStringLiteral("…") + tabKeys.last().second, QStringLiteral("Go to tab N")});
+    else
+        for (const auto &[n, keys] : tabKeys)
+            groups[layout.size() - 1].entries.append({keys, QStringLiteral("Go to tab %1").arg(n)});
+    groups.erase(std::remove_if(groups.begin(), groups.end(), [](const KeyMapSheet::Group &g) { return g.entries.isEmpty(); }),
+                 groups.end());
+
+    static const QList<QPair<QString, QString>> knownFamilies = {
+        {QStringLiteral("g"), QStringLiteral("go")},          {QStringLiteral("y"), QStringLiteral("copy")},
+        {QStringLiteral("d"), QStringLiteral("cut/remove")},  {QStringLiteral("p"), QStringLiteral("paste")},
+        {QStringLiteral("s"), QStringLiteral("sort")},        {QStringLiteral("z"), QStringLiteral("view")},
+        {QStringLiteral("u"), QStringLiteral("undo/unmark")},
+    };
+    QList<QPair<QString, QString>> families;
+    for (const auto &family : knownFamilies)
+        if (std::any_of(bindings.begin(), bindings.end(),
+                        [&](const Binding &b) { return b.keys.size() > 1 && b.keys.first() == family.first; }))
+            families << family;
+
+    m_keySheet->setContent(families, groups);
+    m_overlay = Overlay::KeyMap;
+    m_scrim->show();
+    m_keySheet->show();
+    positionOverlays();
+}
+
+void MainWindow::toggleProperties() {
+    m_propertiesOpen = !m_propertiesOpen;
+    if (!m_propertiesOpen) {
+        if (m_sizeCount)
+            m_sizeCount->cancel = true;
+        m_sizeCount.reset();
+        m_sizeTimer.stop();
+        m_propertiesKey.clear();
+        m_shelf->hide();
+    }
+    updatePreview();
+}
+
+void MainWindow::updateProperties() {
+    m_shelf->setVisible(m_propertiesOpen);
+    const QStringList paths = targets();
+    const QString key = paths.join(u'\n');
+    if (!m_propertiesOpen || key == m_propertiesKey)
+        return;
+    m_propertiesKey = key;
+    if (m_sizeCount)
+        m_sizeCount->cancel = true;
+    m_sizeCount.reset();
+    m_sizeTimer.stop();
+    if (paths.isEmpty()) {
+        m_shelf->setContent(QStringLiteral("Nothing selected"), {}, {});
+        return;
+    }
+
     QList<QPair<QString, QString>> rows;
-    QString title;
-    QStringList sizeTargets = paths;
+    QString title, meta;
+    bool count = true;
     if (paths.size() == 1) {
         const FileEntry e = statEntry(paths.first());
         QMimeDatabase db;
         const QMimeType mime = e.isDir ? db.mimeTypeForName(QStringLiteral("inode/directory")) : db.mimeTypeForFile(e.path);
         title = e.name;
-        rows << QPair{QStringLiteral("Type"), QStringLiteral("%1 (%2)").arg(mime.comment(), mime.name())};
-        rows << QPair{QStringLiteral("Location"), tilde(parentDir(e.path))};
-        rows << QPair{QStringLiteral("Size"), e.isDir ? QStringLiteral("computing…") : QStringLiteral("%1 (%2 bytes)").arg(humanSize(e.size)).arg(e.size)};
+        meta = e.isSymlink ? QStringLiteral("link to %1").arg(mime.comment()) : mime.comment();
         if (e.isDir) {
-            QString err;
-            rows << QPair{QStringLiteral("Contains"), plural(int(listDirectory(e.path, &err).size()), "item")};
+            rows << QPair{QStringLiteral("Contains"), QStringLiteral("…")};
+            rows << QPair{QStringLiteral("Total size"), QStringLiteral("counting…")};
+        } else {
+            rows << QPair{QStringLiteral("Size"), sizeWithBytes(e.size)};
+            count = false;
         }
-        rows << QPair{QStringLiteral("Modified"), QDateTime::fromSecsSinceEpoch(e.mtime).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))};
-        rows << QPair{QStringLiteral("Permissions"), QStringLiteral("%1 (%2)").arg(permissionString(e)).arg(e.mode & 07777, 4, 8, QLatin1Char('0'))};
+        rows << QPair{QStringLiteral("Modified"), formatStamp(e.mtime)};
+        if (const qint64 born = birthTime(e.path); born >= 0)
+            rows << QPair{QStringLiteral("Created"), formatStamp(born)};
         const passwd *pw = getpwuid(e.uid);
         const group *gr = getgrgid(e.gid);
-        rows << QPair{QStringLiteral("Owner"), QStringLiteral("%1:%2").arg(pw ? QString::fromLocal8Bit(pw->pw_name) : QString::number(e.uid),
-                                                                          gr ? QString::fromLocal8Bit(gr->gr_name) : QString::number(e.gid))};
+        rows << QPair{QStringLiteral("Access"),
+                      QStringLiteral("%1 (%2) %3:%4")
+                          .arg(permissionString(e))
+                          .arg(e.mode & 07777, 4, 8, QLatin1Char('0'))
+                          .arg(pw ? QString::fromLocal8Bit(pw->pw_name) : QString::number(e.uid),
+                               gr ? QString::fromLocal8Bit(gr->gr_name) : QString::number(e.gid))};
+        rows << QPair{QStringLiteral("Where"), tilde(parentDir(e.path))};
         if (e.isSymlink)
             rows << QPair{QStringLiteral("Link target"), e.linkTarget};
-        if (!e.isDir)
-            sizeTargets.clear();
     } else {
         title = plural(int(paths.size()), "item");
-        rows << QPair{QStringLiteral("Size"), QStringLiteral("computing…")};
-        rows << QPair{QStringLiteral("Location"), tilde(parentDir(paths.first()))};
+        meta = QStringLiteral("marked");
+        rows << QPair{QStringLiteral("Total size"), QStringLiteral("counting…")};
+        QSet<QString> folders;
+        for (const QString &p : paths)
+            folders.insert(parentDir(p));
+        rows << QPair{QStringLiteral("Where"), folders.size() == 1 ? tilde(*folders.begin()) : plural(int(folders.size()), "folder")};
     }
-    m_properties->setRows(title, rows);
-    m_overlay = Overlay::Properties;
-    m_propertiesPath = paths.join(u'\n');
-    m_properties->show();
-    m_properties->raise();
-    positionOverlays();
-    if (sizeTargets.isEmpty())
+    m_shelf->setContent(title, meta, rows);
+    if (!count)
         return;
-    const QString key = m_propertiesPath;
-    QPointer<MainWindow> self(this);
-    QtConcurrent::run([sizeTargets] {
-        qint64 total = 0;
-        for (const QString &p : sizeTargets)
-            total += treeSize(p);
-        return total;
-    }).then(this, [self, key](qint64 total) {
-        if (self && self->m_propertiesPath == key)
-            self->m_properties->updateRow(QStringLiteral("Size"),
-                                          QStringLiteral("%1 (%2 bytes)").arg(humanSize(total)).arg(total));
+    auto job = std::make_shared<SizeCount>();
+    m_sizeCount = job;
+    const bool folder = paths.size() == 1;
+    QThreadPool::globalInstance()->start([job, paths, folder] {
+        if (folder) {
+            QString err;
+            job->children = int(listDirectory(paths.first(), &err).size());
+        }
+        for (const QString &p : paths)
+            countTree(p, true, job->bytes, job->cancel);
+        job->done = true;
     });
+    m_sizeTimer.start();
 }
 
 void MainWindow::positionOverlays() {
     if (!m_bottom)
         return;
-    const int margin = 8;
-    const int top = m_header->geometry().bottom() + 4;
-    const int bottom = m_bottom->geometry().top() - 4;
+    const QMargins shadow = card::shadowMargins();
+    const int top = m_header->geometry().bottom() + 1;
+    const int statusTop = m_status->mapTo(this, QPoint(0, 0)).y();
+    // Floating cards keep clear of the window's rounded corners.
+    const int side = 40;
+    if (m_scrim->isVisible()) {
+        m_scrim->setGeometry(0, 0, width(), statusTop);
+        m_scrim->raise();
+    }
     if (m_picker->isVisible()) {
-        const int h = std::min(m_picker->preferredHeight(), int(height() * 0.6));
-        m_picker->setGeometry(margin, bottom - h, width() - 2 * margin, h);
+        const bool confirming = m_prompt->isOpen() && m_prompt->style() == PromptSpec::Style::Confirm;
+        const int bodyWidth = std::min(confirming ? 580 : 760, width() - 2 * side);
+        const int w = bodyWidth + shadow.left() + shadow.right();
+        const int maxHeight = statusTop - top - 24;
+        const int h = std::min(m_picker->preferredHeight(), maxHeight);
+        const int y = confirming ? top + (statusTop - top - h) / 2 : top + 28 - shadow.top();
+        m_picker->setGeometry((width() - w) / 2, std::max(top, y), w, h);
         m_picker->raise();
     }
+    if (m_prompt->isOpen()) {
+        switch (m_prompt->style()) {
+        case PromptSpec::Style::Bar:
+            m_prompt->setGeometry(QRect(m_promptSpace->mapTo(this, QPoint(0, 0)), m_promptSpace->size()));
+            break;
+        case PromptSpec::Style::Palette:
+            m_prompt->setGeometry(m_picker->inputRect().translated(m_picker->pos()));
+            break;
+        case PromptSpec::Style::Confirm:
+            m_prompt->setGeometry(QRect(m_picker->pos() + m_picker->bodyRect().center(), QSize(1, 1)));
+            break;
+        }
+        m_prompt->raise();
+    }
     if (m_whichKey->isVisible()) {
-        const QSize s = m_whichKey->preferredSize(std::max(1, width() - 2 * margin), std::max(1, bottom - top));
-        m_whichKey->setGeometry(std::max(0, width() - s.width() - margin), std::max({0, top, bottom - s.height()}),
-                                s.width(), s.height());
+        const QSize s = m_whichKey->preferredSize(std::max(1, width() - 2 * side), std::max(1, statusTop - top - 4));
+        m_whichKey->setGeometry((width() - s.width()) / 2, std::max(top, statusTop - s.height()), s.width(), s.height());
+        m_whichKey->raise();
     }
     if (m_tasksView->isVisible()) {
-        const QSize s = m_tasksView->preferredSize(width() - 4 * margin, height() - 120);
-        m_tasksView->setGeometry((width() - s.width()) / 2, (height() - s.height()) / 2, s.width(), s.height());
+        const QSize s = m_tasksView->preferredSize(width() - 2 * side, statusTop - top - 24);
+        m_tasksView->setGeometry((width() - s.width()) / 2, top + 28 - shadow.top(), s.width(), s.height());
+        m_tasksView->raise();
     }
-    if (m_properties->isVisible()) {
-        const QSize s = m_properties->preferredSize(width() - 4 * margin);
-        m_properties->setGeometry((width() - s.width()) / 2, (height() - s.height()) / 2, s.width(), s.height());
+    if (m_keySheet->isVisible()) {
+        const QSize s = m_keySheet->preferredSize(width() - 2 * side, statusTop - top - 24);
+        m_keySheet->setGeometry((width() - s.width()) / 2, top + 16 - shadow.top(), s.width(), s.height());
+        m_keySheet->raise();
     }
 }
 
@@ -1046,7 +1342,8 @@ void MainWindow::promptRename() {
         return;
     const QString oldName = e->name;
     PromptSpec spec;
-    spec.label = QStringLiteral("rename:");
+    spec.label = QStringLiteral("rename");
+    spec.hint = QStringLiteral("Enter rename · Esc cancel");
     spec.text = oldName;
     const int dot = int(oldName.lastIndexOf(u'.'));
     spec.selectionStart = 0;
@@ -1074,7 +1371,9 @@ void MainWindow::promptRename() {
 
 void MainWindow::promptCreate(const QString &initial) {
     PromptSpec spec;
-    spec.label = QStringLiteral("create (end with / for a folder):");
+    spec.label = QStringLiteral("create");
+    spec.placeholder = QStringLiteral("name, or name/ for a folder");
+    spec.hint = QStringLiteral("Enter create · Esc cancel");
     spec.text = initial;
     spec.onAccept = [this](const QString &text, const PickerItem *) { createPath(text); };
     openPrompt(spec);
@@ -1111,65 +1410,133 @@ void MainWindow::createPath(const QString &input) {
     message(QStringLiteral("created %1").arg(tilde(path)), StatusBar::Level::Success);
 }
 
+void MainWindow::confirm(const QString &title, const QString &meta, const QList<PickerItem> &items, const QString &body,
+                         const QString &yes, std::function<void()> accept, std::function<void()> reject) {
+    PromptSpec spec;
+    spec.style = PromptSpec::Style::Confirm;
+    spec.showList = true;
+    spec.onChange = [this, accept, reject](const QString &text) {
+        m_prompt->close(true);
+        if (text == QLatin1String("y") || text == QLatin1String("Y"))
+            accept();
+        else if (reject)
+            reject();
+    };
+    spec.onAccept = [reject](const QString &, const PickerItem *) {
+        if (reject)
+            reject();
+    };
+    openPrompt(spec);
+    constexpr int kShown = 8;
+    QList<PickerItem> shown = items.mid(0, items.size() > kShown + 1 ? kShown : kShown + 1);
+    if (shown.size() < items.size()) {
+        PickerItem more;
+        more.text = QStringLiteral("+%1 more").arg(items.size() - shown.size());
+        shown << more;
+    }
+    m_picker->setHeader(title, meta);
+    m_picker->setShowSelection(false);
+    m_picker->setItems(shown);
+    m_picker->setEmptyText(body);
+    m_picker->setFooter(QStringLiteral("y %1 · Esc cancel").arg(yes));
+    positionOverlays();
+}
+
 void MainWindow::confirmDelete() {
     const QStringList paths = targets();
     if (paths.isEmpty())
         return;
-    PromptSpec spec;
-    spec.label = QStringLiteral("permanently delete %1? [y/N]")
-                     .arg(paths.size() == 1 ? baseName(paths.first()) : plural(int(paths.size()), "item"));
-    spec.onChange = [this, paths](const QString &text) {
-        if (text.isEmpty())
-            return;
-        m_prompt->close(true);
-        if (text == QLatin1String("y") || text == QLatin1String("Y")) {
-            m_marks.clear();
-            startTask(Task::Delete, paths, {});
-        } else {
-            message(QStringLiteral("delete cancelled"));
-        }
-    };
-    spec.onAccept = [this](const QString &, const PickerItem *) { message(QStringLiteral("delete cancelled")); };
-    openPrompt(spec);
+    QList<PickerItem> items;
+    for (const QString &p : paths) {
+        PickerItem item;
+        item.text = baseName(p);
+        item.icon = entryKind(statEntry(p));
+        if (parentDir(p) != m_cwd)
+            item.description = tilde(parentDir(p));
+        items << item;
+    }
+    auto cancelled = [this] { message(QStringLiteral("delete cancelled")); };
+    confirm(QStringLiteral("Delete permanently?"), QStringLiteral("%1 · skips the trash").arg(plural(int(paths.size()), "item")),
+            items, {}, QStringLiteral("delete"),
+            [this, paths] {
+                m_marks.clear();
+                startTask(Task::Delete, paths, {});
+            },
+            cancelled);
 }
 
 void MainWindow::promptFilter() {
     PromptSpec spec;
-    spec.label = QStringLiteral("filter:");
+    spec.label = QStringLiteral("filter");
+    spec.placeholder = QStringLiteral("text, or a glob like *.png");
+    spec.hint = QStringLiteral("Enter keep · Esc clear");
     spec.text = m_currentModel->filter();
-    spec.onChange = [this](const QString &text) { m_currentModel->setFilter(text); };
+    spec.onChange = [this](const QString &text) {
+        m_currentModel->setFilter(text);
+        const int n = m_currentModel->rowCount();
+        if (text.isEmpty())
+            m_prompt->setInfo({});
+        else if (n == 0)
+            m_prompt->setInfo(QStringLiteral("no matches"), Theme::p().red);
+        else
+            m_prompt->setInfo(QStringLiteral("%1 match%2").arg(n).arg(n == 1 ? "" : "es"));
+    };
     spec.onCancel = [this] { m_currentModel->setFilter({}); };
     spec.onAccept = [this](const QString &, const PickerItem *) { updateStatus(); };
     openPrompt(spec);
 }
 
-namespace {
-bool nameMatches(const QString &name, const QString &query) {
-    const bool caseSensitive = std::any_of(query.begin(), query.end(), [](QChar c) { return c.isUpper(); });
-    return name.contains(query, caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive);
+QString MainWindow::searchPosition(const NameMatcher &matcher) const {
+    int total = 0, current = 0;
+    const int cursor = cursorRow();
+    for (int r = 0; r < m_currentModel->rowCount(); ++r) {
+        if (!matcher.matches(m_currentModel->entry(r)->name))
+            continue;
+        ++total;
+        if (r <= cursor)
+            current = total;
+    }
+    if (total == 0)
+        return {};
+    return QStringLiteral("%1 of %2").arg(std::max(1, current)).arg(total);
 }
-} // namespace
 
 void MainWindow::promptSearch(bool backwards) {
     const int origin = std::max(0, cursorRow());
+    const QString previous = m_search;
     PromptSpec spec;
     spec.label = backwards ? QStringLiteral("?") : QStringLiteral("/");
+    spec.placeholder = QStringLiteral("name, or a glob like *.png");
+    spec.hint = QStringLiteral("n/N next · Esc");
     spec.onChange = [this, origin, backwards](const QString &text) {
+        const NameMatcher matcher(text);
+        m_currentView->setHighlight(matcher);
         if (text.isEmpty()) {
             setCursor(origin);
+            m_prompt->setInfo({});
             return;
         }
         const int n = m_currentModel->rowCount();
         for (int i = 0; i < n; ++i) {
             const int row = backwards ? ((origin - i) % n + n) % n : (origin + i) % n;
-            if (nameMatches(m_currentModel->entry(row)->name, text)) {
+            if (matcher.matches(m_currentModel->entry(row)->name)) {
                 setCursor(row);
+                m_prompt->setInfo(searchPosition(matcher));
                 return;
             }
         }
+        setCursor(origin);
+        m_prompt->setInfo(QStringLiteral("no matches"), Theme::p().red);
     };
-    spec.onCancel = [this, origin] { setCursor(origin); };
-    spec.onAccept = [this, backwards](const QString &text, const PickerItem *) {
+    spec.onCancel = [this, origin, previous] {
+        setCursor(origin);
+        m_currentView->setHighlight(NameMatcher(previous));
+    };
+    spec.onAccept = [this, backwards, previous](const QString &text, const PickerItem *) {
+        if (text.isEmpty()) {
+            m_currentView->setHighlight(NameMatcher(previous));
+            return;
+        }
         m_search = text;
         m_searchBackwards = backwards;
     };
@@ -1181,13 +1548,16 @@ void MainWindow::searchNext(int direction) {
         message(QStringLiteral("no search; use / to search"));
         return;
     }
+    const NameMatcher matcher(m_search);
+    m_currentView->setHighlight(matcher);
     const int n = m_currentModel->rowCount();
     const int step = m_searchBackwards ? -direction : direction;
     const int start = std::max(0, cursorRow());
     for (int i = 1; i <= n; ++i) {
         const int row = ((start + step * i) % n + n) % n;
-        if (nameMatches(m_currentModel->entry(row)->name, m_search)) {
+        if (matcher.matches(m_currentModel->entry(row)->name)) {
             setCursor(row);
+            message(QStringLiteral("/%1  %2").arg(m_search, searchPosition(matcher)));
             return;
         }
     }
@@ -1211,7 +1581,9 @@ void MainWindow::promptFind() {
     m_finderTruncated = false;
     m_walker.start(m_cwd, m_options.showHidden);
     PromptSpec spec;
-    spec.label = QStringLiteral("files:");
+    spec.style = PromptSpec::Style::Palette;
+    spec.label = QStringLiteral("›");
+    spec.placeholder = QStringLiteral("Find files and folders below %1").arg(tilde(m_cwd));
     spec.showList = true;
     spec.onChange = [this](const QString &) { updateFinderList(); };
     spec.onAccept = [this](const QString &, const PickerItem *item) {
@@ -1280,20 +1652,28 @@ void MainWindow::updateFinderList() {
     m_picker->setProperty("lastQuery", query);
     QString status;
     if (m_walker.isRunning())
-        status = QStringLiteral(" · scanning…");
+        status = QStringLiteral("scanning…");
     else if (m_finderTruncated)
-        status = QStringLiteral(" · stopped at limit");
-    m_picker->setHeader(QStringLiteral("%1 of %2 files and folders in %3%4")
-                            .arg(matches)
-                            .arg(m_finderItems.size())
-                            .arg(tilde(m_finderRoot), status));
+        status = QStringLiteral("stopped at limit");
+    m_picker->setHeader(
+        QStringLiteral("%1 of %2 files and folders in %3").arg(matches).arg(m_finderItems.size()).arg(tilde(m_finderRoot)),
+        status);
+    if (m_walker.isRunning())
+        m_picker->setEmptyText(QStringLiteral("Scanning %1…").arg(tilde(m_finderRoot)));
+    else if (query.isEmpty())
+        m_picker->setEmptyText(QStringLiteral("Nothing below %1").arg(tilde(m_finderRoot)));
+    else
+        m_picker->setEmptyText(QStringLiteral("Nothing matches “%1”").arg(query),
+                               QStringLiteral("Letters match in order, anywhere in the path"));
     m_picker->setFooter(QStringLiteral("↑↓ move · Enter go · Esc close"));
     positionOverlays();
 }
 
 void MainWindow::promptCommand(const QString &initial) {
     PromptSpec spec;
-    spec.label = QStringLiteral(":");
+    spec.style = PromptSpec::Style::Palette;
+    spec.label = QStringLiteral("›");
+    spec.placeholder = QStringLiteral("Search commands and keys, or type a command line");
     spec.text = initial;
     spec.showList = true;
     spec.onChange = [this](const QString &text) { updateCommandList(text); };
@@ -1303,54 +1683,124 @@ void MainWindow::promptCommand(const QString &initial) {
         const QString data = item->data.toString();
         if (data.startsWith(QLatin1String("cmd:")))
             return data.mid(4) + u' ';
+        if (data.startsWith(QLatin1String("line:")))
+            return data.mid(5);
         if (data.startsWith(QLatin1String("complete:")))
             return data.mid(9);
         return {};
     };
     spec.onAccept = [this](const QString &text, const PickerItem *item) {
-        QString line = text.trimmed();
-        if (item) {
-            const QString data = item->data.toString();
-            if (data.startsWith(QLatin1String("cmd:"))) {
-                const QString name = data.mid(4);
-                const CommandDef *def = m_commands.find(name);
-                if (def && def->requiresArgs) {
-                    QTimer::singleShot(0, this, [this, name] { promptCommand(name + u' '); });
-                    return;
-                }
-                line = name;
-            } else if (data.startsWith(QLatin1String("complete:"))) {
-                line = data.mid(9).trimmed();
-            }
-        }
-        if (!line.isEmpty())
+        const QString line = text.trimmed();
+        const QStringList parts = CommandRegistry::split(line);
+        const QString data = item ? item->data.toString() : QString();
+        // A typed command line with arguments runs as typed, unless a row was picked with the arrows.
+        const CommandDef *def = m_commands.find(parts.value(0));
+        if (parts.size() > 1 && def && !def->usage.isEmpty() && !(item && m_picker->selectionTouched())) {
             runCommandLine(line);
+            return;
+        }
+        if (data.startsWith(QLatin1String("cmd:"))) {
+            const QString name = data.mid(4);
+            const CommandDef *def = m_commands.find(name);
+            if (def && def->requiresArgs) {
+                QTimer::singleShot(0, this, [this, name] { promptCommand(name + u' '); });
+                return;
+            }
+            runCommandLine(name);
+        } else if (data.startsWith(QLatin1String("line:"))) {
+            runCommandLine(data.mid(5));
+        } else if (data.startsWith(QLatin1String("complete:"))) {
+            runCommandLine(data.mid(9).trimmed());
+        } else if (!line.isEmpty()) {
+            runCommandLine(line);
+        }
     };
     openPrompt(spec);
+}
+
+QList<PickerItem> MainWindow::commandItems(const QString &query) const {
+    QHash<QString, QStringList> keys;
+    QHash<QString, QString> descriptions;
+    QStringList withArgs;
+    for (const Binding &b : bindingsByKeys(m_keys)) {
+        keys[b.command] << card::keyLabel(b.keys);
+        const QStringList parts = CommandRegistry::split(b.command);
+        const bool bare = parts.size() == 1 && m_commands.find(parts.first());
+        if (!bare && !withArgs.contains(b.command)) {
+            withArgs << b.command;
+            descriptions.insert(b.command, b.description.isEmpty() ? b.command : b.description);
+        }
+    }
+
+    struct Row {
+        PickerItem item;
+        QString keyText;
+    };
+    QList<Row> rows;
+    static const QSet<QString> palette = {QStringLiteral("command"), QStringLiteral("help")};
+    for (const CommandDef *def : m_commands.all()) {
+        if (palette.contains(def->name))
+            continue;
+        PickerItem item;
+        item.text = def->description;
+        item.description = def->name;
+        item.data = QStringLiteral("cmd:") + def->name;
+        rows.append({item, keys.value(def->name).mid(0, 4).join(QStringLiteral("  "))});
+    }
+    for (const QString &line : withArgs) {
+        PickerItem item;
+        item.text = descriptions.value(line);
+        item.description = line;
+        item.data = QStringLiteral("line:") + line;
+        rows.append({item, keys.value(line).mid(0, 4).join(QStringLiteral("  "))});
+    }
+
+    QList<std::pair<int, PickerItem>> scored;
+    for (Row &row : rows) {
+        row.item.keys = row.keyText;
+        int score = 0;
+        if (!query.isEmpty()) {
+            fuzzy::Match text, name, key;
+            const bool inText = fuzzy::match(query, row.item.text, &text);
+            const bool inName = fuzzy::match(query, row.item.description, &name);
+            const bool inKeys = !row.keyText.isEmpty() && fuzzy::match(query, row.keyText, &key);
+            if (!inText && !inName && !inKeys)
+                continue;
+            score = std::max({inText ? text.score : INT_MIN, inName ? name.score : INT_MIN, inKeys ? key.score : INT_MIN});
+            if (inText && text.score == score)
+                row.item.highlights = text.positions;
+            else if (inName && name.score == score)
+                row.item.descriptionHighlights = name.positions;
+        }
+        scored.append({score, row.item});
+    }
+    std::stable_sort(scored.begin(), scored.end(), [](const auto &a, const auto &b) {
+        if (a.first != b.first)
+            return a.first > b.first;
+        return a.second.text.compare(b.second.text, Qt::CaseInsensitive) < 0;
+    });
+    QList<PickerItem> items;
+    for (const auto &s : scored)
+        items << s.second;
+    return items;
 }
 
 void MainWindow::updateCommandList(const QString &text) {
     const QStringList parts = CommandRegistry::split(text);
     const bool trailingSpace = text.endsWith(u' ');
     QList<PickerItem> items;
-    if (parts.isEmpty() || (parts.size() == 1 && !trailingSpace)) {
-        const QString query = parts.value(0);
-        QList<std::pair<int, PickerItem>> scored;
-        for (const CommandDef *def : m_commands.all()) {
-            fuzzy::Match m;
-            if (!query.isEmpty() && !fuzzy::match(query, def->name, &m))
-                continue;
-            PickerItem item;
-            item.text = def->name;
-            item.description = def->usage.isEmpty() ? def->description : def->usage + QStringLiteral("  ") + def->description;
-            item.hint = m_keys.keysFor(def->name);
-            item.highlights = m.positions;
-            item.data = QStringLiteral("cmd:") + def->name;
-            scored.append({m.score, item});
-        }
-        std::stable_sort(scored.begin(), scored.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-        for (const auto &s : scored)
-            items << s.second;
+    QString header, meta, emptyTitle, emptyHint;
+    // Text is a command line once it starts with a command that takes arguments
+    // and goes past its name; anything else searches, spaces and all.
+    const CommandDef *typed = m_commands.find(parts.value(0));
+    const bool commandLine = typed && !typed->usage.isEmpty() && (parts.size() > 1 || trailingSpace);
+    if (!commandLine) {
+        const QString query = text.trimmed();
+        items = commandItems(query);
+        header = QStringLiteral("Commands");
+        meta = query.isEmpty() ? plural(int(items.size()), "command") : QStringLiteral("%1 of %2").arg(items.size()).arg(commandItems({}).size());
+        emptyTitle = QStringLiteral("No commands match “%1”").arg(text.trimmed());
+        emptyHint = QStringLiteral("Try a word from the description, a command name, or a key");
     } else {
         const QString name = parts.first();
         const QString arg = trailingSpace ? QString() : parts.last();
@@ -1419,53 +1869,16 @@ void MainWindow::updateCommandList(const QString &text) {
                 items << item;
             }
         }
+        // "sort by size" may be a search for a description rather than arguments.
+        items << commandItems(text.trimmed()).mid(0, 5);
+        header = typed->description;
+        meta = typed->name + u' ' + typed->usage;
     }
     m_picker->setItems(items);
-    m_picker->setHeader({});
+    m_picker->setHeader(header, meta);
+    m_picker->setEmptyText(emptyTitle, emptyHint);
     m_picker->setFooter(QStringLiteral("↑↓ move · Tab complete · Enter run · Esc close"));
     positionOverlays();
-}
-
-void MainWindow::showHelp() {
-    auto rebuild = [this](const QString &query) {
-        QList<std::pair<int, PickerItem>> scored;
-        for (const Binding &b : m_keys.bindings()) {
-            const QString desc = b.description.isEmpty() ? b.command : b.description;
-            fuzzy::Match m;
-            if (!query.isEmpty() && !fuzzy::match(query, desc + u' ' + b.command, &m))
-                continue;
-            PickerItem item;
-            item.text = desc;
-            item.description = b.command == desc ? QString() : b.command;
-            item.hint = KeyMap::display(b.keys);
-            for (int p : m.positions)
-                if (p < desc.size())
-                    item.highlights << p;
-            item.data = QStringLiteral("complete:") + b.command;
-            scored.append({query.isEmpty() ? 0 : m.score, item});
-        }
-        std::stable_sort(scored.begin(), scored.end(), [&](const auto &a, const auto &b) {
-            if (a.first != b.first)
-                return a.first > b.first;
-            return a.second.text.compare(b.second.text, Qt::CaseInsensitive) < 0;
-        });
-        QList<PickerItem> items;
-        for (const auto &s : scored)
-            items << s.second;
-        m_picker->setItems(items);
-        m_picker->setHeader(QStringLiteral("Key bindings · %1").arg(items.size()));
-        m_picker->setFooter(QStringLiteral("type to filter · Enter run · Esc close"));
-        positionOverlays();
-    };
-    PromptSpec spec;
-    spec.label = QStringLiteral("help:");
-    spec.showList = true;
-    spec.onChange = rebuild;
-    spec.onAccept = [this](const QString &, const PickerItem *item) {
-        if (item)
-            runCommandLine(item->data.toString().mid(9));
-    };
-    openPrompt(spec);
 }
 
 void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
@@ -1517,7 +1930,7 @@ void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
         QStringLiteral("toggle-hidden"));
     if (e) {
         menu.addSeparator();
-        add(QStringLiteral("Properties"), QStringLiteral("properties"));
+        add(m_propertiesOpen ? QStringLiteral("Hide Properties") : QStringLiteral("Properties"), QStringLiteral("properties"));
     }
     menu.exec(globalPos);
 }
@@ -1763,7 +2176,7 @@ void MainWindow::registerCommands() {
     });
 
     // Prompts and panels
-    cmd(QStringLiteral("command"), QStringLiteral("Open the command line"), [this](const CommandContext &) { promptCommand(); });
+    cmd(QStringLiteral("command"), QStringLiteral("Open the command palette"), [this](const CommandContext &) { promptCommand(); });
     cmd(QStringLiteral("shell"), QStringLiteral("Run a shell command here; targets are $@"), [this](const CommandContext &c) {
         if (c.args.isEmpty()) {
             promptShell();
@@ -1785,8 +2198,10 @@ void MainWindow::registerCommands() {
         QProcess::startDetached(term, terminalArgsForDirectory(term, m_cwd), m_cwd);
     });
     cmd(QStringLiteral("tasks"), QStringLiteral("Show copy, move and delete progress"), [this](const CommandContext &) { showTasks(); });
-    cmd(QStringLiteral("properties"), QStringLiteral("Show details and total size"), [this](const CommandContext &) { showProperties(); });
-    cmd(QStringLiteral("help"), QStringLiteral("List key bindings"), [this](const CommandContext &) { showHelp(); });
+    cmd(QStringLiteral("properties"), QStringLiteral("Show or hide details and total size under the preview"),
+        [this](const CommandContext &) { toggleProperties(); });
+    cmd(QStringLiteral("help"), QStringLiteral("Open the command palette"), [this](const CommandContext &) { promptCommand(); });
+    cmd(QStringLiteral("keymap"), QStringLiteral("Show key map"), [this](const CommandContext &) { showKeyMap(); });
     cmd(QStringLiteral("new-window"), QStringLiteral("Open another window here"), [this](const CommandContext &) {
         const QStringList args = QCoreApplication::arguments();
         QProcess::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd});
@@ -1937,8 +2352,6 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("<End>"), QStringLiteral("bottom"));
     bind(QStringLiteral("<C-d>"), QStringLiteral("half-page-down"));
     bind(QStringLiteral("<C-u>"), QStringLiteral("half-page-up"));
-    bind(QStringLiteral("<C-f>"), QStringLiteral("page-down"));
-    bind(QStringLiteral("<C-b>"), QStringLiteral("page-up"));
     bind(QStringLiteral("<PageDown>"), QStringLiteral("page-down"));
     bind(QStringLiteral("<PageUp>"), QStringLiteral("page-up"));
     bind(QStringLiteral("H"), QStringLiteral("back"));
@@ -1963,9 +2376,8 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("gt"), QStringLiteral("next-tab"));
     bind(QStringLiteral("gT"), QStringLiteral("prev-tab"));
     bind(QStringLiteral("gn"), QStringLiteral("new-tab"));
-    bind(QStringLiteral("gf"), QStringLiteral("find"));
     bind(QStringLiteral("gx"), QStringLiteral("open"));
-    bind(QStringLiteral("<C-p>"), QStringLiteral("find"));
+    bind(QStringLiteral("<C-f>"), QStringLiteral("find"));
 
     bind(QStringLiteral("<Space>"), QStringLiteral("toggle-mark"));
     bind(QStringLiteral("v"), QStringLiteral("visual"));
@@ -2002,7 +2414,6 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("O"), QStringLiteral("open-with"));
 
     bind(QStringLiteral("/"), QStringLiteral("search"));
-    bind(QStringLiteral("?"), QStringLiteral("help"));
     bind(QStringLiteral("n"), QStringLiteral("search-next"));
     bind(QStringLiteral("N"), QStringLiteral("search-prev"));
     bind(QStringLiteral("zf"), QStringLiteral("filter"));
@@ -2016,7 +2427,7 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("se"), QStringLiteral("sort extension"), QStringLiteral("Sort by extension"));
     bind(QStringLiteral("sr"), QStringLiteral("sort reverse"), QStringLiteral("Reverse the sort"));
 
-    bind(QStringLiteral(":"), QStringLiteral("command"));
+    bind(QStringLiteral("<C-k>"), QStringLiteral("command"));
     bind(QStringLiteral("!"), QStringLiteral("shell"));
     bind(QStringLiteral("T"), QStringLiteral("terminal"));
     bind(QStringLiteral("w"), QStringLiteral("tasks"));
@@ -2205,19 +2616,12 @@ void MainWindow::confirmEmptyTrash() {
         message(QStringLiteral("the trash is empty"));
         return;
     }
-    PromptSpec spec;
-    spec.label = QStringLiteral("permanently delete everything in the trash? [y/N]");
-    spec.onChange = [this, paths](const QString &text) {
-        if (text.isEmpty())
-            return;
-        m_prompt->close(true);
-        if (text == QLatin1String("y") || text == QLatin1String("Y"))
-            startTask(Task::Delete, paths, {});
-        else
-            message(QStringLiteral("trash left alone"));
-    };
-    spec.onAccept = [this](const QString &, const PickerItem *) { message(QStringLiteral("trash left alone")); };
-    openPrompt(spec);
+    int count = 0;
+    for (const QString &p : paths)
+        count += parentDir(p).endsWith(QLatin1String("/files")) ? 1 : 0;
+    confirm(QStringLiteral("Empty the trash?"), plural(count, "item"), {},
+            QStringLiteral("Everything in the trash is deleted for good."), QStringLiteral("empty"),
+            [this, paths] { startTask(Task::Delete, paths, {}); }, [this] { message(QStringLiteral("trash left alone")); });
 }
 
 // Bulk rename
@@ -2430,25 +2834,9 @@ void MainWindow::finishBulkRename(const QStringList &paths, const QStringList &r
             item.description = tilde(parentDir(from));
         items << item;
     }
-    PromptSpec spec;
-    spec.label = QStringLiteral("rename %1? [y/N]").arg(plural(int(renames.size()), "item"));
-    spec.showList = true;
-    spec.onChange = [this, renames, items](const QString &text) {
-        if (text.isEmpty()) {
-            m_picker->setItems(items);
-            m_picker->setHeader(QStringLiteral("bulk rename"));
-            m_picker->setFooter(QStringLiteral("y rename · anything else cancels"));
-            positionOverlays();
-            return;
-        }
-        m_prompt->close(true);
-        if (text == QLatin1String("y") || text == QLatin1String("Y"))
-            applyRenames(renames);
-        else
-            message(QStringLiteral("bulk rename cancelled"));
-    };
-    spec.onAccept = [this](const QString &, const PickerItem *) { message(QStringLiteral("bulk rename cancelled")); };
-    openPrompt(spec);
+    confirm(QStringLiteral("Rename %1?").arg(plural(int(renames.size()), "item")), QStringLiteral("bulk rename"), items, {},
+            QStringLiteral("rename"), [this, renames] { applyRenames(renames); },
+            [this] { message(QStringLiteral("bulk rename cancelled")); });
 }
 
 // File chooser
@@ -2603,18 +2991,13 @@ void MainWindow::chooserSave(const QString &input) {
         chooserAcceptPaths({path});
         return;
     }
-    PromptSpec spec;
-    spec.label = QStringLiteral("replace %1? [y/N]").arg(baseName(path));
-    spec.onChange = [this, path](const QString &text) {
-        if (text.isEmpty())
-            return;
-        m_prompt->close(true);
-        if (text == QLatin1String("y") || text == QLatin1String("Y"))
-            chooserAcceptPaths({path});
-        else if (m_chooserBar)
+    auto backToName = [this] {
+        if (m_chooserBar)
             m_chooserBar->nameEdit()->setFocus(Qt::OtherFocusReason);
     };
-    openPrompt(spec);
+    confirm(QStringLiteral("Replace %1?").arg(baseName(path)), {}, {},
+            QStringLiteral("A file with that name already exists in %1.").arg(tilde(parentDir(path))), QStringLiteral("replace"),
+            [this, path] { chooserAcceptPaths({path}); }, backToName);
 }
 
 void MainWindow::chooserAcceptPaths(const QStringList &paths) {

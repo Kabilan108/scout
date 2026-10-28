@@ -341,7 +341,7 @@ private slots:
         key(w, Qt::Key_Escape);
         QTRY_COMPARE(w.currentModel()->rowCount(), 5);
 
-        keys(w, QStringLiteral("gf"));
+        key(w, Qt::Key_F, Qt::ControlModifier);
         QVERIFY(w.prompt()->isOpen());
         keys(w, QStringLiteral("deep"));
         QTRY_VERIFY(!w.picker()->items().isEmpty());
@@ -351,15 +351,15 @@ private slots:
         QCOMPARE(w.cwd(), base + QStringLiteral("/alpha/inner"));
         QTRY_COMPARE(currentName(w), QStringLiteral("deep.txt"));
 
-        keys(w, QStringLiteral(":"));
+        key(w, Qt::Key_K, Qt::ControlModifier);
         keys(w, QStringLiteral("mkdir made"));
         key(w, Qt::Key_Return);
         QTRY_VERIFY(QFileInfo(base + QStringLiteral("/alpha/inner/made")).isDir());
 
-        keys(w, QStringLiteral(":"));
+        key(w, Qt::Key_K, Qt::ControlModifier);
         keys(w, QStringLiteral("hidd"));
         QTRY_VERIFY(!w.picker()->items().isEmpty());
-        QCOMPARE(w.picker()->items().first().text, QStringLiteral("toggle-hidden"));
+        QCOMPARE(w.picker()->items().first().description, QStringLiteral("toggle-hidden"));
         key(w, Qt::Key_Return);
         QVERIFY(w.options().showHidden);
 
@@ -405,7 +405,6 @@ private slots:
         // Decorations keep the scheme's own colors.
         QCOMPARE(Palette::fromBase16(stylix, {}).overlay, QColor(QStringLiteral("#45475a")));
     }
-
 
     void deleteNeverFollowsSymlinks() {
         const QString base = makeTree();
@@ -535,6 +534,216 @@ private slots:
         QVERIFY(!NameMatcher(QStringLiteral("[ab")).matches(QStringLiteral("[ab")));
     }
 
+    void filterTakesGlobs() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("f*.txt"));
+        QTRY_COMPARE(w.currentModel()->rowCount(), 2);
+        QCOMPARE(w.prompt()->style(), PromptSpec::Style::Bar);
+        QCOMPARE(w.prompt()->info(), QStringLiteral("2 matches"));
+        key(w, Qt::Key_Return);
+        QCOMPARE(w.currentModel()->filter(), QStringLiteral("*.txt"));
+        key(w, Qt::Key_Escape);
+        QTRY_COMPARE(w.currentModel()->rowCount(), 5);
+        keys(w, QStringLiteral("ffile?.txt"));
+        QTRY_COMPARE(w.currentModel()->rowCount(), 1);
+        QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
+        key(w, Qt::Key_Escape);
+        QTRY_COMPARE(w.currentModel()->rowCount(), 5);
+    }
+
+    void searchBarCountsMatchesAndTakesGlobs() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("/"));
+        QVERIFY(w.prompt()->isOpen());
+        QCOMPARE(w.prompt()->style(), PromptSpec::Style::Bar);
+        // The bar sits above the status bar, which stays in view.
+        QVERIFY(w.statusBar()->isVisible());
+        QVERIFY(w.prompt()->geometry().bottom() < w.statusBar()->mapTo(&w, QPoint(0, 0)).y());
+        keys(w, QStringLiteral("file"));
+        QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
+        QCOMPARE(w.prompt()->info(), QStringLiteral("1 of 2"));
+        QCOMPARE(w.currentView()->highlight().pattern(), QStringLiteral("file"));
+        key(w, Qt::Key_Return);
+        keys(w, QStringLiteral("n"));
+        QCOMPARE(currentName(w), QStringLiteral("file10.txt"));
+        keys(w, QStringLiteral("N"));
+        QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
+
+        // A glob matches whole names; Esc puts the cursor and the old search back.
+        keys(w, QStringLiteral("/*.md"));
+        QCOMPARE(currentName(w), QStringLiteral("notes.md"));
+        QCOMPARE(w.prompt()->info(), QStringLiteral("1 of 1"));
+        key(w, Qt::Key_Escape);
+        QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
+        QCOMPARE(w.currentView()->highlight().pattern(), QStringLiteral("file"));
+        keys(w, QStringLiteral("/*.MD"));
+        QCOMPARE(w.prompt()->info(), QStringLiteral("no matches"));
+        key(w, Qt::Key_Escape);
+        key(w, Qt::Key_Escape);
+        QVERIFY(w.currentView()->highlight().isEmpty());
+    }
+
+    void paletteMergesHelpAndRunsArguments() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.keymap()->keysFor(QStringLiteral("command")), QStringLiteral("<C-k>"));
+        QCOMPARE(w.keymap()->keysFor(QStringLiteral("find")), QStringLiteral("<C-f>"));
+        QVERIFY(w.keymap()->keysFor(QStringLiteral("help")).isEmpty());
+        for (const Binding &b : w.keymap()->bindings()) {
+            const QString keys = b.keys.join(u' ');
+            QVERIFY2(!QStringList({QStringLiteral(":"), QStringLiteral("?"), QStringLiteral("<C-p>"), QStringLiteral("g f"),
+                                   QStringLiteral("<C-b>")})
+                          .contains(keys),
+                     qPrintable(keys));
+            if (keys == QLatin1String("<C-f>"))
+                QCOMPARE(b.command, QStringLiteral("find"));
+        }
+
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        QVERIFY(w.prompt()->isOpen());
+        QCOMPARE(w.prompt()->style(), PromptSpec::Style::Palette);
+        QVERIFY(w.picker()->isVisible());
+        // One row per command with all of its keys, and one per binding that has arguments.
+        auto row = [&](const QString &command) -> PickerItem {
+            for (const PickerItem &item : w.picker()->items())
+                if (item.description == command)
+                    return item;
+            return {};
+        };
+        QVERIFY(row(QStringLiteral("toggle-hidden")).keys.contains(QStringLiteral("zh")));
+        QVERIFY(row(QStringLiteral("toggle-hidden")).keys.contains(QStringLiteral("Ctrl-h")));
+        QCOMPARE(row(QStringLiteral("sort name")).text, QStringLiteral("Sort by name"));
+        QCOMPARE(row(QStringLiteral("sort name")).keys, QStringLiteral("sn"));
+        QVERIFY(row(QStringLiteral("command")).description.isEmpty());
+        // Keys and several words are searchable.
+        keys(w, QStringLiteral("zh"));
+        QCOMPARE(w.picker()->items().first().description, QStringLiteral("toggle-hidden"));
+        w.prompt()->edit()->clear();
+        keys(w, QStringLiteral("copy path"));
+        QCOMPARE(w.picker()->items().first().description, QStringLiteral("copy-path"));
+        // A command line with arguments runs as typed.
+        w.prompt()->edit()->clear();
+        keys(w, QStringLiteral("sort size"));
+        key(w, Qt::Key_Return);
+        QVERIFY(!w.prompt()->isOpen());
+        QCOMPARE(w.options().sort, ViewOptions::Size);
+        // Rows that need arguments fill in the name.
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        keys(w, QStringLiteral("mkdir"));
+        QCOMPARE(w.picker()->items().first().description, QStringLiteral("mkdir"));
+        key(w, Qt::Key_Return);
+        QTRY_VERIFY(w.prompt()->isOpen());
+        QCOMPARE(w.prompt()->text(), QStringLiteral("mkdir "));
+        key(w, Qt::Key_Escape);
+        // Nothing found says so in a sentence.
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        keys(w, QStringLiteral("qqxqz"));
+        QVERIFY(w.picker()->items().isEmpty());
+        QCOMPARE(w.picker()->emptyTitle(), QStringLiteral("No commands match “qqxqz”"));
+        key(w, Qt::Key_Escape);
+        // The old command names open the same palette.
+        for (const char *name : {"help", "command"}) {
+            w.runCommandLine(QLatin1String(name));
+            QVERIFY(w.prompt()->isOpen());
+            QCOMPARE(w.picker()->header(), QStringLiteral("Commands"));
+            key(w, Qt::Key_Escape);
+            QVERIFY(!w.prompt()->isOpen());
+        }
+    }
+
+    void keyMapSheetFollowsTheBindings() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.runCommandLine(QStringLiteral("map <C-y> copy"));
+        w.runCommandLine(QStringLiteral("unmap yy"));
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        keys(w, QStringLiteral("keymap"));
+        QCOMPARE(w.picker()->items().first().text, QStringLiteral("Show key map"));
+        key(w, Qt::Key_Return);
+        QVERIFY(w.keyMapSheet()->isVisible());
+        QStringList titles;
+        QString copyKeys;
+        for (const KeyMapSheet::Group &g : w.keyMapSheet()->groups()) {
+            titles << g.title;
+            for (const KeyMapSheet::Entry &e : g.entries)
+                if (e.description == QLatin1String("Copy to the clipboard"))
+                    copyKeys = e.keys;
+        }
+        QCOMPARE(titles.mid(0, 9), (QStringList{QStringLiteral("Move"), QStringLiteral("Go"), QStringLiteral("Select"),
+                                               QStringLiteral("Copy & move"), QStringLiteral("Remove & undo"),
+                                               QStringLiteral("Change"), QStringLiteral("Find"), QStringLiteral("View"),
+                                               QStringLiteral("Tabs")}));
+        QVERIFY2(copyKeys.contains(QStringLiteral("Ctrl-y")) && !copyKeys.contains(QStringLiteral("yy")), qPrintable(copyKeys));
+        QVERIFY(w.rect().contains(w.keyMapSheet()->geometry()));
+        key(w, Qt::Key_Escape);
+        QVERIFY(!w.keyMapSheet()->isVisible());
+    }
+
+    void propertiesShelfFollowsTheCursor() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.resize(1000, 600);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        const int fullHeight = w.preview()->height();
+        key(w, Qt::Key_Return, Qt::AltModifier);
+        PropertiesShelf *shelf = w.propertiesShelf();
+        QTRY_VERIFY(shelf->isVisible());
+        // The preview gives up the room rather than being covered.
+        QTRY_VERIFY(w.preview()->height() < fullHeight);
+        QVERIFY(w.preview()->geometry().bottom() < shelf->geometry().top());
+        QCOMPARE(shelf->title(), QStringLiteral("alpha"));
+        QTRY_VERIFY2(shelf->value(QStringLiteral("Total size")).contains(QStringLiteral("12 bytes")),
+                     qPrintable(shelf->value(QStringLiteral("Total size"))));
+        QCOMPARE(shelf->value(QStringLiteral("Contains")), QStringLiteral("2 items"));
+        keys(w, QStringLiteral("G"));
+        QTRY_COMPARE(shelf->title(), QStringLiteral("notes.md"));
+        QVERIFY(shelf->value(QStringLiteral("Size")).contains(QStringLiteral("19 bytes")));
+        QVERIFY(shelf->value(QStringLiteral("Access")).contains(QStringLiteral("-rw")));
+        // Marks turn it into a summary.
+        key(w, Qt::Key_Space);
+        keys(w, QStringLiteral("gg"));
+        key(w, Qt::Key_Space);
+        QTRY_COMPARE(shelf->title(), QStringLiteral("2 items"));
+        QTRY_VERIFY(shelf->value(QStringLiteral("Total size")).contains(QStringLiteral("31 bytes")));
+        key(w, Qt::Key_Escape);
+        QVERIFY(shelf->isVisible());
+        key(w, Qt::Key_Return, Qt::AltModifier);
+        QVERIFY(!shelf->isVisible());
+        QTRY_COMPARE(w.preview()->height(), fullHeight);
+        // Esc closes it once nothing else is left to clear.
+        key(w, Qt::Key_Return, Qt::AltModifier);
+        QVERIFY(shelf->isVisible());
+        key(w, Qt::Key_Escape);
+        QVERIFY(!shelf->isVisible());
+    }
+
+    void tabsShowEvenWhenThereIsOne() {
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.headerBar()->tabRects().size(), 1);
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        QTRY_VERIFY(w.isIdle());
+        const QList<QRect> tabs = w.headerBar()->tabRects();
+        QCOMPARE(tabs.size(), 2);
+        QVERIFY(tabs[0].right() < tabs[1].left());
+        QTest::mouseClick(w.headerBar(), Qt::LeftButton, {}, tabs[0].center());
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.currentTab(), 0);
+        QCOMPARE(w.cwd(), base);
+    }
 
     void crossDeviceMoveCopiesThenRemoves() {
         struct stat shm {}, root {};
