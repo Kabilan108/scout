@@ -1200,17 +1200,6 @@ void MainWindow::searchNext(int direction) {
     error(QStringLiteral("no match for %1").arg(m_search));
 }
 
-void MainWindow::promptShell() {
-    PromptSpec spec;
-    spec.label = QStringLiteral("!");
-    spec.onAccept = [this](const QString &text, const PickerItem *) {
-        if (text.trimmed().isEmpty())
-            return;
-        runCommandLine(QStringLiteral("shell ") + CommandRegistry::quote(text));
-    };
-    openPrompt(spec);
-}
-
 void MainWindow::promptFind() {
     m_finderRoot = m_cwd;
     m_finderItems.clear();
@@ -1555,7 +1544,7 @@ bool MainWindow::runCommandLine(const QString &line, int count) {
         QStringLiteral("half-page-up"),   QStringLiteral("page-down"),    QStringLiteral("page-up"),
         QStringLiteral("search"),         QStringLiteral("search-back"),  QStringLiteral("search-next"),
         QStringLiteral("search-prev"),    QStringLiteral("preview-down"), QStringLiteral("preview-up"),
-        QStringLiteral("zoom-in"),        QStringLiteral("zoom-out"),
+        QStringLiteral("zoom-in"),        QStringLiteral("zoom-out"),     QStringLiteral("zoom-reset"),
     };
     if (!keepsVisual.contains(def->name))
         endVisual();
@@ -1773,6 +1762,7 @@ void MainWindow::registerCommands() {
     });
     cmd(QStringLiteral("zoom-in"), QStringLiteral("Bigger text"), [](const CommandContext &) { Theme::instance().zoom(1); });
     cmd(QStringLiteral("zoom-out"), QStringLiteral("Smaller text"), [](const CommandContext &) { Theme::instance().zoom(-1); });
+    cmd(QStringLiteral("zoom-reset"), QStringLiteral("Text back to the configured size"), [](const CommandContext &) { Theme::instance().resetZoom(); });
     cmd(QStringLiteral("reload"), QStringLiteral("Reload the listing"), [this](const CommandContext &) {
         m_currentModel->reload();
         m_parentModel->reload();
@@ -1781,18 +1771,6 @@ void MainWindow::registerCommands() {
 
     // Prompts and panels
     cmd(QStringLiteral("command"), QStringLiteral("Open the command line"), [this](const CommandContext &) { promptCommand(); });
-    cmd(QStringLiteral("shell"), QStringLiteral("Run a shell command here; targets are $@"), [this](const CommandContext &c) {
-        if (c.args.isEmpty()) {
-            promptShell();
-            return;
-        }
-        QStringList args{QStringLiteral("-c"), c.args.join(u' '), QStringLiteral("scout")};
-        args << targets();
-        if (launcher::startDetached(QStringLiteral("sh"), args, m_cwd))
-            message(QStringLiteral("started: %1").arg(c.args.join(u' ')));
-        else
-            error(QStringLiteral("could not start sh"));
-    }, QStringLiteral("<command>"));
     cmd(QStringLiteral("terminal"), QStringLiteral("Open a terminal in this folder"), [this](const CommandContext &) {
         const QString term = terminalProgram();
         if (term.isEmpty()) {
@@ -1973,18 +1951,16 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("~"), QStringLiteral("cd ~"), QStringLiteral("Home"));
 
     bind(QStringLiteral("gh"), QStringLiteral("cd ~"), QStringLiteral("Home"));
-    bind(QStringLiteral("gd"), QStringLiteral("cd ~/Downloads"), QStringLiteral("Downloads"));
-    bind(QStringLiteral("gD"), QStringLiteral("cd ~/Documents"), QStringLiteral("Documents"));
-    bind(QStringLiteral("gp"), QStringLiteral("cd ~/Pictures"), QStringLiteral("Pictures"));
-    bind(QStringLiteral("gv"), QStringLiteral("cd ~/Videos"), QStringLiteral("Videos"));
-    bind(QStringLiteral("gM"), QStringLiteral("cd ~/Music"), QStringLiteral("Music"));
+    // Follows ~/.config/user-dirs.dirs.
+    bind(QStringLiteral("gd"),
+         QStringLiteral("cd ") + CommandRegistry::quote(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)),
+         QStringLiteral("Downloads"));
     bind(QStringLiteral("gc"), QStringLiteral("cd ~/.config"), QStringLiteral("~/.config"));
     bind(QStringLiteral("gr"), QStringLiteral("cd ~/repos"), QStringLiteral("~/repos"));
     bind(QStringLiteral("g/"), QStringLiteral("cd /"), QStringLiteral("Root /"));
     bind(QStringLiteral("gb"), QStringLiteral("cd ~/.local/share/Trash/files"), QStringLiteral("Trash (bin)"));
-    bind(QStringLiteral("gm"), QStringLiteral("cd /run/media"), QStringLiteral("Mounted drives"));
     bind(QStringLiteral("gt"), QStringLiteral("next-tab"));
-    bind(QStringLiteral("gT"), QStringLiteral("prev-tab"));
+    bind(QStringLiteral("gp"), QStringLiteral("prev-tab"));
     bind(QStringLiteral("gn"), QStringLiteral("new-tab"));
     bind(QStringLiteral("gf"), QStringLiteral("find"));
     bind(QStringLiteral("gx"), QStringLiteral("open"));
@@ -2040,7 +2016,6 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("sr"), QStringLiteral("sort reverse"), QStringLiteral("Reverse the sort"));
 
     bind(QStringLiteral(":"), QStringLiteral("command"));
-    bind(QStringLiteral("!"), QStringLiteral("shell"));
     bind(QStringLiteral("T"), QStringLiteral("terminal"));
     bind(QStringLiteral("w"), QStringLiteral("tasks"));
     bind(QStringLiteral("<A-CR>"), QStringLiteral("properties"));
@@ -2049,6 +2024,7 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("<C-=>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-+>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-->"), QStringLiteral("zoom-out"));
+    bind(QStringLiteral("<C-0>"), QStringLiteral("zoom-reset"));
     bind(QStringLiteral("q"), QStringLiteral("close-tab"));
     bind(QStringLiteral("<C-q>"), QStringLiteral("quit"));
     bind(QStringLiteral("<C-w>"), QStringLiteral("close-tab"));

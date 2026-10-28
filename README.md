@@ -38,10 +38,10 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `Enter` | open with the default app |
 | `gg` `G` `5j` `Ctrl-d` `Ctrl-u` | top, bottom, counts, half pages |
 | `H` `L` | back and forward in history |
-| `gh` `gd` `gD` `gp` `gv` `gM` | home, Downloads, Documents, Pictures, Videos, Music |
-| `gc` `gr` `g/` `gb` `gm` | ~/.config, ~/repos, /, the trash (bin), mounted drives |
+| `gh` `gd` | home, your downloads folder (`XDG_DOWNLOAD_DIR` from `~/.config/user-dirs.dirs`) |
+| `gc` `gr` `g/` `gb` | ~/.config, ~/repos, /, the trash (bin) |
 | `gn` / `Ctrl-t` | new tab here |
-| `gt` `gT` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
+| `gt` `gp` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
 | `q` / `Ctrl-w` | close the tab (the window, if it's the last); `Ctrl-q` closes the window |
 | `uq` | reopen the last closed tab |
 | `gf` / `Ctrl-p` | fuzzy find below the current folder |
@@ -64,12 +64,11 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `sn` `ss` `sm` `se` `sr` | sort by name, size, modified, extension; reverse |
 | `J` `K` | scroll the preview |
 | `:` | command line with completion |
-| `!` | run a shell command here; marked files are `"$@"` |
 | `T` | terminal in this folder |
 | `w` | tasks: progress of copies and moves (`x` cancels) |
 | `Alt-Enter` | properties, including total folder size |
 | `Ctrl-n` | new window here |
-| `Ctrl-=` `Ctrl--` | zoom |
+| `Ctrl-=` `Ctrl--` `Ctrl-0` | zoom in, out, and back to the configured size |
 
 Marks persist across folders and tabs, so you can collect files from several
 places and then copy, trash, or drag them together. Visual mode ends when you
@@ -191,4 +190,4 @@ Without NixOS, make scout the default folder handler with
 
 - Chooser windows open as ordinary windows rather than attached to the app
   that asked (xdg-foreign); niri places them like any new window.
-- Mounting and ejecting drives; `gm` only browses what is already mounted.
+- Mounting and ejecting drives.

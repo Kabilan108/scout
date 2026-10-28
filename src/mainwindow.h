@@ -158,7 +158,6 @@ private:
     void searchNext(int direction);
     void promptCommand(const QString &initial = {});
     void updateCommandList(const QString &text);
-    void promptShell();
     void promptFind();
     void updateFinderList();
     void showHelp();

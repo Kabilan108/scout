@@ -49,8 +49,11 @@ public:
 
     QFont font() const { return m_font; }
     void setFontFamily(const QString &family);
+    // The configured size, which zoom-reset returns to.
     void setFontSize(double points);
     void zoom(double deltaPoints);
+    void resetZoom();
+    double defaultFontSize() const { return m_defaultSize; }
     int rowHeight() const;
 
 signals:
@@ -62,6 +65,7 @@ private slots:
 private:
     Theme() = default;
     void rebuild();
+    void applyFontSize(double points);
     void applyToApplication();
     void watchStylix();
 
@@ -69,6 +73,7 @@ private:
     ThemeMode m_mode = ThemeMode::Auto;
     int m_portalScheme = 0; // 0 no preference, 1 dark, 2 light
     QFont m_font;
+    double m_defaultSize = 10.5;
     QFileSystemWatcher m_watcher;
     QString m_stylixPath;
 };

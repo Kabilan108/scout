@@ -120,6 +120,7 @@ void Theme::init() {
     m_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     if (m_font.pointSizeF() < 9)
         m_font.setPointSizeF(10.5);
+    m_defaultSize = m_font.pointSizeF();
 
     auto bus = QDBusConnection::sessionBus();
     if (bus.isConnected()) {
@@ -203,12 +204,19 @@ void Theme::setFontFamily(const QString &family) {
 }
 
 void Theme::setFontSize(double points) {
-    m_font.setPointSizeF(std::clamp(points, 6.0, 32.0));
+    m_defaultSize = std::clamp(points, 6.0, 32.0);
+    applyFontSize(m_defaultSize);
+}
+
+void Theme::zoom(double deltaPoints) { applyFontSize(std::clamp(m_font.pointSizeF() + deltaPoints, 6.0, 32.0)); }
+
+void Theme::resetZoom() { applyFontSize(m_defaultSize); }
+
+void Theme::applyFontSize(double points) {
+    m_font.setPointSizeF(points);
     applyToApplication();
     emit changed();
 }
-
-void Theme::zoom(double deltaPoints) { setFontSize(m_font.pointSizeF() + deltaPoints); }
 
 int Theme::rowHeight() const { return QFontMetrics(m_font).height() + 6; }
 

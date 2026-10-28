@@ -148,6 +148,7 @@ private slots:
         QVERIFY(m_root.isValid());
         qputenv("XDG_DATA_HOME", (m_root.path() + QStringLiteral("/xdg-data")).toLocal8Bit());
         qputenv("XDG_CONFIG_HOME", (m_root.path() + QStringLiteral("/xdg-config")).toLocal8Bit());
+        qputenv("XDG_STATE_HOME", (m_root.path() + QStringLiteral("/xdg-state")).toLocal8Bit());
         QDir().mkpath(m_root.path() + QStringLiteral("/xdg-data"));
         Theme::instance().init();
         // No test starts a real program: only stand-ins the tests write under m_root run.
@@ -1394,6 +1395,47 @@ private slots:
         QCOMPARE(out.value(QStringLiteral("uris")).toStringList(), QStringList{QStringLiteral("file:///tmp/a%20b.png")});
         QVERIFY(out.contains(QStringLiteral("current_filter")));
         QVERIFY(service::resultsFromChooser(r, ChooserResult{}).isEmpty());
+    }
+
+    void goKeysAndRemovedBindings() {
+        const QString downloads = m_root.path() + QStringLiteral("/my downloads");
+        QVERIFY(QDir().mkpath(downloads));
+        writeFile(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/user-dirs.dirs"),
+                  "XDG_DOWNLOAD_DIR=\"" + downloads.toUtf8() + "\"\n");
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("gd"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), downloads);
+
+        for (const char *gone : {"!", "gT", "gD", "gv", "gM", "gm"}) {
+            const QStringList seq = KeyMap::parseSequence(QLatin1String(gone));
+            const QList<Binding> all = w.keymap()->bindings();
+            QVERIFY2(std::none_of(all.begin(), all.end(), [&](const Binding &b) { return b.keys == seq; }), gone);
+        }
+        QVERIFY(!w.runCommandLine(QStringLiteral("shell true")));
+
+        w.runCommandLine(QStringLiteral("cd ") + base);
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/beta"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.currentTab(), 2);
+        keys(w, QStringLiteral("gp"));
+        QCOMPARE(w.currentTab(), 1);
+        keys(w, QStringLiteral("gp"));
+        QCOMPARE(w.currentTab(), 0);
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), base);
+
+        const double size = Theme::instance().font().pointSizeF();
+        key(w, Qt::Key_Equal, Qt::ControlModifier);
+        key(w, Qt::Key_Equal, Qt::ControlModifier);
+        QCOMPARE(Theme::instance().font().pointSizeF(), size + 2);
+        key(w, Qt::Key_0, Qt::ControlModifier);
+        QCOMPARE(Theme::instance().font().pointSizeF(), Theme::instance().defaultFontSize());
+        QFile::remove(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/user-dirs.dirs"));
     }
 
     void logWritesLinesAndRotates() {
