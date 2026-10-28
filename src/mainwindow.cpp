@@ -4,6 +4,7 @@
 #include "fuzzy.h"
 #include "launcher.h"
 #include "logging.h"
+#include "state.h"
 #include "theme.h"
 
 #include <QClipboard>
@@ -1884,8 +1885,9 @@ void MainWindow::registerCommands() {
         } else if (key == QLatin1String("font-size")) {
             bool ok = false;
             const double size = value.toDouble(&ok);
+            // From scout.conf it is only the default; typed, it replaces any remembered zoom.
             if (ok)
-                Theme::instance().setFontSize(size);
+                Theme::instance().setFontSize(size, !m_loadingConfig);
             else
                 error(QStringLiteral("font-size needs a number"));
         } else {
@@ -2054,13 +2056,44 @@ void MainWindow::loadConfig() {
             problems << QStringLiteral("line %1: unknown command %2").arg(lineNo).arg(name);
             continue;
         }
+        m_loadingConfig = true;
         runCommandLine(line);
+        m_loadingConfig = false;
     }
     if (!problems.isEmpty())
         error(QStringLiteral("scout.conf: ") + problems.join(QStringLiteral("; ")));
 }
 
 // Tabs
+
+bool MainWindow::restoreSession() {
+    const std::optional<state::Session> saved = state::session();
+    if (!saved || saved->tabs.isEmpty())
+        return false;
+    QList<Tab> tabs;
+    int active = 0;
+    for (int i = 0; i < saved->tabs.size(); ++i) {
+        if (!QFileInfo(saved->tabs[i]).isDir())
+            continue;
+        // A vanished active tab hands over to the one before it.
+        if (i <= saved->active)
+            active = int(tabs.size());
+        Tab t;
+        t.cwd = saved->tabs[i];
+        tabs << t;
+    }
+    if (tabs.isEmpty()) {
+        Tab home;
+        home.cwd = QDir::homePath();
+        tabs << home;
+    }
+    logging::info(QStringLiteral("restored %1 of %2 saved tabs").arg(tabs.size()).arg(saved->tabs.size()));
+    m_tabs = tabs;
+    m_back.clear();
+    m_forward.clear();
+    loadTab(active);
+    return true;
+}
 
 void MainWindow::saveTab() {
     Tab &t = m_tabs[m_tab];
@@ -2651,6 +2684,14 @@ void MainWindow::closeEvent(QCloseEvent *event) {
                       .arg(m_closeReason.isEmpty() ? QStringLiteral("the window manager") : m_closeReason, m_cwd,
                            plural(int(m_tabs.size()), "tab")));
     m_closeReason.clear();
+    if (!isChooser()) {
+        saveTab();
+        state::Session session;
+        for (const Tab &t : std::as_const(m_tabs))
+            session.tabs << t.cwd;
+        session.active = m_tab;
+        state::setSession(session);
+    }
     if (m_chooserDone) {
         ChooserResult result;
         auto done = std::exchange(m_chooserDone, {});

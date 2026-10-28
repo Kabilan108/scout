@@ -9,6 +9,8 @@
 #include "logging.h"
 #include "mainwindow.h"
 #include "service.h"
+#include "startup.h"
+#include "state.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -1436,6 +1438,90 @@ private slots:
         key(w, Qt::Key_0, Qt::ControlModifier);
         QCOMPARE(Theme::instance().font().pointSizeF(), Theme::instance().defaultFontSize());
         QFile::remove(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/user-dirs.dirs"));
+    }
+
+    void zoomIsRememberedAndReset() {
+        Theme &theme = Theme::instance();
+        const double systemSize = theme.defaultFontSize();
+        theme.resetZoom();
+        QVERIFY(!state::fontSize());
+        const QString conf = qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/scout/scout.conf");
+        writeFile(conf, "set font-size 9\n");
+        const QString base = makeTree();
+        {
+            MainWindow w(base, true);
+            QCOMPARE(theme.font().pointSizeF(), 9.0);
+            w.runCommandLine(QStringLiteral("zoom-in"));
+            w.runCommandLine(QStringLiteral("zoom-in"));
+            QCOMPARE(theme.font().pointSizeF(), 11.0);
+            QCOMPARE(state::fontSize(), std::optional<double>(11.0));
+        }
+        // The next start: the remembered size beats the config's default.
+        theme.setFontSize(systemSize);
+        theme.restoreZoom();
+        {
+            MainWindow w(base, true);
+            QCOMPARE(theme.font().pointSizeF(), 11.0);
+            QCOMPARE(theme.defaultFontSize(), 9.0);
+            key(w, Qt::Key_0, Qt::ControlModifier);
+            QCOMPARE(theme.font().pointSizeF(), 9.0);
+            QVERIFY(!state::fontSize());
+            // Typing `set font-size` replaces a remembered zoom.
+            w.runCommandLine(QStringLiteral("zoom-out"));
+            QVERIFY(state::fontSize());
+            w.runCommandLine(QStringLiteral("set font-size 14"));
+            QCOMPARE(theme.font().pointSizeF(), 14.0);
+            QVERIFY(!state::fontSize());
+        }
+        QVERIFY(QFile::remove(conf));
+        theme.setFontSize(systemSize, true);
+    }
+
+    void tabsRestoredOnlyWithoutAPath() {
+        const QString base = makeTree();
+        const QString alpha = base + QStringLiteral("/alpha"), beta = base + QStringLiteral("/beta");
+        state::setSession({{alpha, base + QStringLiteral("/gone"), beta}, 2});
+        {
+            const auto w = startup::openWindow({}, false);
+            QCOMPARE(w->tabCount(), 2);
+            QCOMPARE(w->currentTab(), 1);
+            QCOMPARE(w->cwd(), beta);
+            w->runCommandLine(QStringLiteral("tab 1"));
+            QCOMPARE(w->cwd(), alpha);
+            w->runCommandLine(QStringLiteral("new-tab ") + base);
+            QCOMPARE(w->currentTab(), 1);
+            w->show();
+            w->close();
+        }
+        // Closing saved the window's tabs.
+        QCOMPARE(state::session()->tabs, (QStringList{alpha, base, beta}));
+        QCOMPARE(state::session()->active, 1);
+        {
+            const auto w = startup::openWindow({beta}, false);
+            QCOMPARE(w->tabCount(), 1);
+            QCOMPARE(w->cwd(), beta);
+        }
+        // FileManager1 windows open just their folder.
+        const QList<MainWindow *> shown = service::showItems({alpha}, true);
+        QCOMPARE(shown.size(), 1);
+        QCOMPARE(shown[0]->tabCount(), 1);
+        QCOMPARE(shown[0]->cwd(), alpha);
+        qDeleteAll(shown);
+        // A chooser leaves the saved tabs alone.
+        {
+            MainWindow chooser(base, false);
+            ChooserRequest request;
+            request.currentFolder = alpha;
+            chooser.setChooser(request, [](const ChooserResult &) {});
+            chooser.show();
+            chooser.close();
+        }
+        QCOMPARE(state::session()->tabs, (QStringList{alpha, base, beta}));
+
+        state::setSession({{base + QStringLiteral("/gone")}, 0});
+        const auto w = startup::openWindow({}, false);
+        QCOMPARE(w->tabCount(), 1);
+        QCOMPARE(w->cwd(), QDir::homePath());
     }
 
     void logWritesLinesAndRotates() {

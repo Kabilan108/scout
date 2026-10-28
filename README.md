@@ -68,12 +68,24 @@ Press `?` for the full, searchable list, or a prefix key (`g`, `y`, `d`, `s`,
 | `w` | tasks: progress of copies and moves (`x` cancels) |
 | `Alt-Enter` | properties, including total folder size |
 | `Ctrl-n` | new window here |
-| `Ctrl-=` `Ctrl--` `Ctrl-0` | zoom in, out, and back to the configured size |
+| `Ctrl-=` `Ctrl--` `Ctrl-0` | zoom in, out (remembered across restarts), and back to the configured size |
 
 Marks persist across folders and tabs, so you can collect files from several
 places and then copy, trash, or drag them together. Visual mode ends when you
 leave the folder or run a command such as `yy` or `dD`, which then acts on
 everything marked.
+
+## Remembered between runs
+
+`~/.local/state/scout/state.json` (`$XDG_STATE_HOME`) holds what scout
+remembers, apart from the config so a Nix-managed `scout.conf` never fights it:
+
+- The zoomed text size. It wins over `set font-size` in the config;
+  `Ctrl-0` goes back to the configured size and forgets it.
+- The tabs (their folders and which was active) of the window you closed
+  last. `scout` with no path reopens them, skipping folders that are gone.
+  `scout <path>`, "Show in folder", file chooser dialogs and `Ctrl-n` open
+  just their folder.
 
 ## Undo, trash, and bulk rename
 

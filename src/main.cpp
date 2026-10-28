@@ -1,11 +1,11 @@
 #include "logging.h"
 #include "mainwindow.h"
 #include "service.h"
+#include "startup.h"
 #include "theme.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
-#include <QDir>
 
 #include <cstring>
 #include <sys/resource.h>
@@ -76,9 +76,8 @@ int main(int argc, char *argv[]) {
     if (service) {
         status = service::run();
     } else {
-        const QStringList paths = parser.positionalArguments();
-        MainWindow window(paths.value(0, QDir::currentPath()), !parser.isSet(noConfig));
-        window.show();
+        const std::unique_ptr<MainWindow> window = startup::openWindow(parser.positionalArguments(), !parser.isSet(noConfig));
+        window->show();
         status = app.exec();
     }
     logging::logExit(status);

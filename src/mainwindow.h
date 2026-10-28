@@ -62,6 +62,9 @@ public:
     QStringList targets() const;
 
     int tabCount() const { return int(m_tabs.size()); }
+    // Reopens the tabs of the window closed last (see state.h), skipping
+    // folders that are gone. False if nothing was saved.
+    bool restoreSession();
     int currentTab() const { return m_tab; }
     int undoDepth() const { return int(m_undo.size()); }
     // Applies renames and records them for undo; returns false if anything failed.
@@ -261,4 +264,5 @@ private:
     QTimer m_whichKeyTimer;
     QTimer m_ambiguityTimer;
     bool m_loadUserConfig;
+    bool m_loadingConfig = false;
 };
