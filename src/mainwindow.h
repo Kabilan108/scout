@@ -118,8 +118,13 @@ private:
     void updatePreview();
     void updateStatus();
     void updateHeader();
+    // Errors and warnings also go to scout.log.
     void message(const QString &text, StatusBar::Level level = StatusBar::Level::Info);
     void error(const QString &text) { message(text, StatusBar::Level::Error); }
+
+    void runFromKeys(const KeyMap::Result &result);
+    // How a command was started, for the log: "quit (key <C-q>)".
+    QString trigger(const QString &command) const;
 
     void setCursor(int row);
     void moveCursor(int delta);
@@ -226,6 +231,8 @@ private:
     bool m_finderTruncated = false;
     bool m_finderActive = false;
     qint64 m_quitArmedAt = 0;
+    QString m_trigger;     // keys running the current command, if any
+    QString m_closeReason; // logged when the window closes
     QTimer m_finderTimer;
 
     // Tabs

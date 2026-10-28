@@ -6,6 +6,7 @@
 #include "fuzzy.h"
 #include "keymap.h"
 #include "launcher.h"
+#include "logging.h"
 #include "mainwindow.h"
 #include "service.h"
 #include "theme.h"
@@ -18,6 +19,7 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -25,10 +27,13 @@
 #include <QUrl>
 
 #include <cerrno>
+#include <cstring>
 #include <fcntl.h>
+#include <csignal>
 #include <linux/landlock.h>
 #include <random>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
@@ -46,6 +51,23 @@ void writeFile(const QString &path, const QByteArray &content = "hello\n") {
 // From here on this process may only create, change or remove files below
 // `root` (and write to /dev/null), and may not exec anything. False when the
 // kernel has no Landlock.
+QString readAll(const QString &path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+}
+
+// `scout_tests --crash-child <log>`: crashes with the handler installed.
+[[noreturn]] void crashChild(const char *logPath) {
+    const rlimit noCore{0, 0};
+    setrlimit(RLIMIT_CORE, &noCore);
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    logging::open(QString::fromLocal8Bit(logPath));
+    logging::installCrashHandler();
+    logging::info(QStringLiteral("about to crash"));
+    raise(SIGSEGV);
+    _exit(3);
+}
+
 bool confineWritesTo(const QString &root) {
     const long abi = syscall(SYS_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 1)
@@ -1374,6 +1396,79 @@ private slots:
         QVERIFY(service::resultsFromChooser(r, ChooserResult{}).isEmpty());
     }
 
+    void logWritesLinesAndRotates() {
+        const QString path = m_root.path() + QStringLiteral("/log-rotate/scout.log");
+        QVERIFY(logging::open(path, 4096));
+        logging::info(QStringLiteral("first line"));
+        logging::warning(QStringLiteral("two\nlines"));
+        const QString first = readAll(path);
+        const QString pid = QString::number(QCoreApplication::applicationPid());
+        QVERIFY2(first.contains(QRegularExpression(QStringLiteral("^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{3} \\[%1\\] I first line\n").arg(pid))),
+                 qPrintable(first));
+        QVERIFY(first.contains(QStringLiteral("] W two\n    lines\n")));
+        for (int i = 0; i < 100; ++i)
+            logging::info(QStringLiteral("filler %1 ").arg(i) + QString(60, u'x'));
+        logging::info(QStringLiteral("last line"));
+        logging::close();
+        QVERIFY(QFile::exists(path + QStringLiteral(".1")));
+        QVERIFY(!QFile::exists(path + QStringLiteral(".2")));
+        QVERIFY(QFileInfo(path).size() <= 4096 + 200);
+        QVERIFY(QFileInfo(path + QStringLiteral(".1")).size() >= 4096);
+        QVERIFY(readAll(path).contains(QStringLiteral("last line")));
+        QVERIFY(!readAll(path).contains(QStringLiteral("first line")));
+        // Nothing is written once closed.
+        logging::info(QStringLiteral("after close"));
+        QVERIFY(!readAll(path).contains(QStringLiteral("after close")));
+    }
+
+    void statusErrorsTasksAndClosesAreLogged() {
+        const QString path = m_root.path() + QStringLiteral("/log-window/scout.log");
+        QVERIFY(logging::open(path));
+        const QString base = makeTree();
+        auto *w = new MainWindow(base, false);
+        w->show();
+        QTRY_VERIFY(w->isIdle());
+        w->runCommandLine(QStringLiteral("cd /no/such/folder"));
+        QVERIFY(readAll(path).contains(QStringLiteral("] E no such directory: /no/such/folder")));
+        w->tasks()->start(Task::Copy, {base + QStringLiteral("/missing")}, base + QStringLiteral("/beta"));
+        QTRY_VERIFY(readAll(path).contains(QStringLiteral("] E task failed: Copying missing to beta")));
+
+        w->runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        QTRY_VERIFY(w->isIdle());
+        keys(*w, QStringLiteral("q"));
+        QVERIFY(readAll(path).contains(QStringLiteral("tab 2 of 2 closed by close-tab (key q): ") + base + QStringLiteral("/alpha")));
+        key(*w, Qt::Key_W, Qt::ControlModifier);
+        QVERIFY(!w->isVisible());
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by close-tab on the last tab (key <C-w>): ") + base));
+        w->show();
+        w->runCommandLine(QStringLiteral("quit"));
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by quit (command)")));
+        w->show();
+        w->close();
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by the window manager")));
+        delete w;
+        logging::close();
+    }
+
+    void crashHandlerLogsSignalAndBacktrace() {
+        char line[160];
+        // 2026-10-28 23:20:01.234 UTC, shown at UTC-4.
+        const size_t n = logging::formatSignal(line, sizeof line, SIGSEGV, 4242, 1793229601234LL, -4 * 3600);
+        QCOMPARE(QByteArray(line, int(n)), QByteArray("2026-10-28 19:20:01.234 [4242] F crash: signal 11 (SIGSEGV), backtrace follows\n"));
+        QVERIFY(logging::formatSignal(line, 12, SIGTERM, 1, 0, 0) == 11);
+
+        const QString path = m_root.path() + QStringLiteral("/log-crash/scout.log");
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {QStringLiteral("--crash-child"), path});
+        QVERIFY(child.waitForFinished(30000));
+        QCOMPARE(child.exitStatus(), QProcess::CrashExit);
+        const QString log = readAll(path);
+        QVERIFY2(log.contains(QStringLiteral("I about to crash")), qPrintable(log));
+        QVERIFY2(log.contains(QStringLiteral("] F crash: signal 11 (SIGSEGV), backtrace follows")), qPrintable(log));
+        // backtrace_symbols_fd lines: "binary(symbol+0x..) [0x...]".
+        QVERIFY2(log.contains(QStringLiteral("scout_tests(")) && log.contains(QStringLiteral(") [0x")), qPrintable(log));
+    }
+
     void showItemsGroupsByFolder() {
         const QString base = makeTree();
         const QList<MainWindow *> windows = service::showItems(
@@ -1392,6 +1487,8 @@ private slots:
 };
 
 int main(int argc, char *argv[]) {
+    if (argc == 3 && std::strcmp(argv[1], "--crash-child") == 0)
+        crashChild(argv[2]);
     QApplication app(argc, argv);
     app.setAttribute(Qt::AA_Use96Dpi, true);
     ScoutTest test;

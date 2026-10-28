@@ -11,14 +11,15 @@
         "aarch64-linux"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      commit = self.shortRev or self.dirtyShortRev or "unknown";
     in
     {
       overlays.default = final: prev: {
-        scout = final.callPackage ./package.nix { };
+        scout = final.callPackage ./package.nix { inherit commit; };
       };
 
       packages = forAllSystems (pkgs: {
-        scout = pkgs.callPackage ./package.nix { };
+        scout = pkgs.callPackage ./package.nix { inherit commit; };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.scout;
       });
 

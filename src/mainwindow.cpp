@@ -3,6 +3,7 @@
 #include "desktopentry.h"
 #include "fuzzy.h"
 #include "launcher.h"
+#include "logging.h"
 #include "theme.h"
 
 #include <QClipboard>
@@ -120,7 +121,7 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
         const KeyMap::Result r = m_keys.flush();
         hideWhichKey();
         if (r.kind == KeyMap::Result::Command)
-            runCommandLine(r.command, r.count);
+            runFromKeys(r);
         updateStatus();
     });
     m_finderTimer.setSingleShot(true);
@@ -525,6 +526,10 @@ void MainWindow::updateStatus() {
 }
 
 void MainWindow::message(const QString &text, StatusBar::Level level) {
+    if (level == StatusBar::Level::Error)
+        logging::error(text);
+    else if (level == StatusBar::Level::Warning)
+        logging::warning(text);
     m_status->showMessage(text, level, level == StatusBar::Level::Error ? 7000 : 3500);
 }
 
@@ -714,7 +719,7 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     case KeyMap::Result::Command:
         m_ambiguityTimer.stop();
         hideWhichKey();
-        runCommandLine(result.command, result.count);
+        runFromKeys(result);
         break;
     case KeyMap::Result::Pending:
         if (m_keys.hasAmbiguousExact())
@@ -997,6 +1002,8 @@ void MainWindow::onTaskFinished(Task *task) {
         message(summary, StatusBar::Level::Success);
         break;
     case Task::Failed:
+        logging::error(QStringLiteral("task failed: %1 (%2)\n%3")
+                           .arg(task->title(), task->sources().join(QStringLiteral(", ")), p.errors.join(u'\n')));
         error(QStringLiteral("%1 failed: %2%3")
                   .arg(task->verb().toLower(), p.errors.value(0))
                   .arg(p.errors.size() > 1 ? QStringLiteral(" (+%1 more, see tasks: w)").arg(p.errors.size() - 1) : QString()));
@@ -1521,6 +1528,17 @@ void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
     menu.exec(globalPos);
 }
 
+void MainWindow::runFromKeys(const KeyMap::Result &result) {
+    m_trigger = KeyMap::display(result.keys);
+    runCommandLine(result.command, result.count);
+    m_trigger.clear();
+}
+
+QString MainWindow::trigger(const QString &command) const {
+    return m_trigger.isEmpty() ? QStringLiteral("%1 (command)").arg(command)
+                               : QStringLiteral("%1 (key %2)").arg(command, m_trigger);
+}
+
 bool MainWindow::runCommandLine(const QString &line, int count) {
     const QStringList parts = CommandRegistry::split(line);
     if (parts.isEmpty())
@@ -1794,10 +1812,13 @@ void MainWindow::registerCommands() {
         newTab(c.args.isEmpty() ? m_cwd : c.args.join(u' '));
     }, QStringLiteral("[path]"));
     cmd(QStringLiteral("close-tab"), QStringLiteral("Close this tab (the window, if it is the last)"), [this](const CommandContext &) {
-        if (m_tabs.size() > 1)
+        if (m_tabs.size() > 1) {
+            logging::info(QStringLiteral("tab %1 of %2 closed by %3: %4").arg(m_tab + 1).arg(m_tabs.size()).arg(trigger(QStringLiteral("close-tab")), m_cwd));
             closeTab();
-        else
+        } else {
+            m_closeReason = trigger(QStringLiteral("close-tab on the last tab"));
             runCommandLine(QStringLiteral("quit"));
+        }
     });
     cmd(QStringLiteral("next-tab"), QStringLiteral("Go to the next tab"), [this](const CommandContext &c) {
         if (m_tabs.size() < 2)
@@ -1835,10 +1856,13 @@ void MainWindow::registerCommands() {
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         if (active > 0 && now - m_quitArmedAt > 3000) {
             m_quitArmedAt = now;
+            m_closeReason.clear();
             message(QStringLiteral("%1 still running; quit again to cancel them").arg(plural(active, "task")),
                     StatusBar::Level::Warning);
             return;
         }
+        if (m_closeReason.isEmpty())
+            m_closeReason = trigger(QStringLiteral("quit"));
         close();
     });
 
@@ -2626,6 +2650,7 @@ void MainWindow::chooserAcceptPaths(const QStringList &paths) {
     result.choices = m_chooserBar->choices();
     auto done = std::exchange(m_chooserDone, {});
     done(result);
+    m_closeReason = QStringLiteral("file chooser accepted");
     QTimer::singleShot(0, this, &QWidget::close);
 }
 
@@ -2640,11 +2665,16 @@ void MainWindow::finishChooser(bool accepted) {
     result.filter = m_chooserBar ? m_chooserBar->filterIndex() : -1;
     auto done = std::exchange(m_chooserDone, {});
     done(result);
+    m_closeReason = QStringLiteral("file chooser cancelled");
     if (isVisible())
         QTimer::singleShot(0, this, &QWidget::close);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    logging::info(QStringLiteral("window closed by %1: %2 (%3)")
+                      .arg(m_closeReason.isEmpty() ? QStringLiteral("the window manager") : m_closeReason, m_cwd,
+                           plural(int(m_tabs.size()), "tab")));
+    m_closeReason.clear();
     if (m_chooserDone) {
         ChooserResult result;
         auto done = std::exchange(m_chooserDone, {});

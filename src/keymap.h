@@ -26,6 +26,7 @@ public:
         enum Kind { None, Pending, Command } kind = None;
         QString command;
         int count = 0; // 0 means no count was typed
+        QStringList keys; // the sequence that ran `command`
     };
 
     void bind(const QString &sequence, const QString &command, const QString &description = {});

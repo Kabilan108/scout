@@ -187,12 +187,12 @@ bool KeyMap::hasAmbiguousExact() const { return !m_pending.isEmpty() && exact(m_
 KeyMap::Result KeyMap::feed(const QString &rawToken) {
     const QString token = normalizeToken(rawToken);
     if (token.isEmpty())
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
 
     if (m_pending.isEmpty() && token.size() == 1 && token[0].isDigit() && (m_count > 0 || token[0] != u'0') &&
         !exact({token}) && !hasLonger({token})) {
         m_count = std::min(m_count * 10 + token[0].digitValue(), 99999);
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
     }
 
     QStringList keys = m_pending;
@@ -200,13 +200,13 @@ KeyMap::Result KeyMap::feed(const QString &rawToken) {
     const Binding *hit = exact(keys);
     const bool longer = hasLonger(keys);
     if (hit && !longer) {
-        Result r{Result::Command, hit->command, m_count};
+        Result r{Result::Command, hit->command, m_count, keys};
         reset();
         return r;
     }
     if (longer) {
         m_pending = keys;
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
     }
     reset();
     return {};
@@ -214,7 +214,7 @@ KeyMap::Result KeyMap::feed(const QString &rawToken) {
 
 KeyMap::Result KeyMap::flush() {
     if (const Binding *hit = m_pending.isEmpty() ? nullptr : exact(m_pending)) {
-        Result r{Result::Command, hit->command, m_count};
+        Result r{Result::Command, hit->command, m_count, m_pending};
         reset();
         return r;
     }

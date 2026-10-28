@@ -170,6 +170,7 @@ QList<MainWindow *> service::showItems(const QStringList &uris, bool folders) {
     }
     QList<MainWindow *> windows;
     for (const auto &[dir, items] : groups) {
+        qInfo("scout FileManager1: window for %s (%d items)", qPrintable(dir), int(items.size()));
         auto *window = new MainWindow(items.isEmpty() ? dir : items.first());
         window->setAttribute(Qt::WA_DeleteOnClose);
         if (items.size() > 1)
