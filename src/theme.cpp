@@ -208,7 +208,8 @@ void Theme::setFontFamily(const QString &family) {
 
 void Theme::setFontSize(double points, bool forgetZoom) {
     m_defaultSize = std::clamp(points, 6.0, 32.0);
-    if (forgetZoom && m_zoomed) {
+    // Another window may have saved a zoom this one never saw.
+    if (forgetZoom) {
         m_zoomed.reset();
         state::setFontSize(std::nullopt);
     }

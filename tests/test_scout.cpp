@@ -1473,6 +1473,10 @@ private slots:
             w.runCommandLine(QStringLiteral("set font-size 14"));
             QCOMPARE(theme.font().pointSizeF(), 14.0);
             QVERIFY(!state::fontSize());
+            // Even a zoom saved by another scout process.
+            state::setFontSize(15.0);
+            w.runCommandLine(QStringLiteral("set font-size 13"));
+            QVERIFY(!state::fontSize());
         }
         QVERIFY(QFile::remove(conf));
         theme.setFontSize(systemSize, true);
