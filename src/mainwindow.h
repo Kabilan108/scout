@@ -224,6 +224,7 @@ private:
     int m_lastRow = 0;
     QString m_search;
     bool m_searchBackwards = false;
+    bool m_searching = false; // the / bar is open
     ClipboardFiles m_register;
 
     // Properties shelf; folder sizes are counted on a worker thread.

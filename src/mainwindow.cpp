@@ -523,6 +523,11 @@ void MainWindow::onCursorMoved() {
     updateVisual();
     updateHeader();
     updateStatus();
+    // The cursor can move under an open search bar, by mouse or a reload.
+    if (m_searching && m_prompt->isOpen()) {
+        if (const QString position = searchPosition(NameMatcher(m_prompt->text())); !position.isEmpty())
+            m_prompt->setInfo(position);
+    }
     m_previewTimer.start();
 }
 
@@ -1518,6 +1523,7 @@ void MainWindow::promptSearch(bool backwards) {
     spec.label = backwards ? QStringLiteral("?") : QStringLiteral("/");
     spec.placeholder = QStringLiteral("name, or a glob like *.png");
     spec.hint = QStringLiteral("n/N next · Esc");
+    m_searching = true;
     spec.onChange = [this, origin, backwards](const QString &text) {
         const NameMatcher matcher(text);
         m_currentView->setHighlight(matcher);
@@ -1539,10 +1545,12 @@ void MainWindow::promptSearch(bool backwards) {
         m_prompt->setInfo(QStringLiteral("no matches"), Theme::p().red);
     };
     spec.onCancel = [this, origin, previous] {
+        m_searching = false;
         setCursor(origin);
         m_currentView->setHighlight(NameMatcher(previous));
     };
     spec.onAccept = [this, backwards, previous](const QString &text, const PickerItem *) {
+        m_searching = false;
         if (text.isEmpty()) {
             m_currentView->setHighlight(NameMatcher(previous));
             return;

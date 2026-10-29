@@ -569,6 +569,13 @@ private slots:
         QCOMPARE(currentName(w), QStringLiteral("file2.txt"));
         QCOMPARE(w.prompt()->info(), QStringLiteral("1 of 2"));
         QCOMPARE(w.currentView()->highlight().pattern(), QStringLiteral("file"));
+        // The count follows the cursor when a click moves it.
+        QTest::mouseClick(w.currentView()->viewport(), Qt::LeftButton, {},
+                          w.currentView()->visualRect(w.currentModel()->index(3)).center());
+        QCOMPARE(currentName(w), QStringLiteral("file10.txt"));
+        QCOMPARE(w.prompt()->info(), QStringLiteral("2 of 2"));
+        w.prompt()->edit()->setFocus();
+        w.currentView()->setCurrentRow(2);
         key(w, Qt::Key_Return);
         keys(w, QStringLiteral("n"));
         QCOMPARE(currentName(w), QStringLiteral("file10.txt"));

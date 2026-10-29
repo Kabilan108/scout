@@ -313,7 +313,7 @@ QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }
 QScrollBar::handle:horizontal { background: %1; border-radius: 3px; min-width: 24px; margin: 1px; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-QLineEdit { background: transparent; border: none; color: %2; selection-background-color: %3; selection-color: %4; }
+QLineEdit { background: transparent; border: none; color: %2; placeholder-text-color: %7; selection-background-color: %3; selection-color: %4; }
 QToolTip { background: %5; color: %2; border: 1px solid %1; padding: 4px; }
 QMenu { background: %5; color: %2; border: 1px solid %1; padding: 4px; }
 QMenu::item { padding: 4px 18px; border-radius: 4px; }
@@ -322,5 +322,5 @@ QMenu::separator { height: 1px; background: %1; margin: 4px 6px; }
 QSplitter::handle { background: %1; }
 )")
                            .arg(cssColor(p.overlay), cssColor(p.text), cssColor(p.accent), cssColor(p.base),
-                                cssColor(p.mantle), cssColor(p.surface)));
+                                cssColor(p.mantle), cssColor(p.surface), cssColor(p.muted)));
 }
