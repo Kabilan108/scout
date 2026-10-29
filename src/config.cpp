@@ -26,13 +26,14 @@ QString listSome(QStringList items) {
     return out;
 }
 
-QString checkCommand(const QStringList &words, const CommandRegistry &commands) {
+// A mapped command may leave out required arguments: the key then opens the prompt for them.
+QString checkCommand(const QStringList &words, const CommandRegistry &commands, bool mapped = false) {
     if (words.isEmpty())
         return {};
     const CommandDef *def = commands.find(words.first());
     if (!def)
         return QStringLiteral("unknown command %1").arg(words.first());
-    if (def->requiresArgs && words.size() < 2)
+    if (def->requiresArgs && words.size() < 2 && !mapped)
         return QStringLiteral("%1 needs %2").arg(def->name, def->usage);
     if (def->name == QLatin1String("set"))
         return config::checkOption(words.value(1), words.mid(2).join(u' '));
@@ -48,7 +49,7 @@ QString checkCommand(const QStringList &words, const CommandRegistry &commands) 
         const QStringList inner = CommandRegistry::split(config::mapCommand(words.mid(1)));
         if (inner.isEmpty())
             return QStringLiteral("map %1: no command").arg(words[1]);
-        if (const QString problem = checkCommand(inner, commands); !problem.isEmpty())
+        if (const QString problem = checkCommand(inner, commands, true); !problem.isEmpty())
             return QStringLiteral("map %1: %2").arg(words[1], problem);
     }
     return {};
