@@ -176,6 +176,44 @@ extend one (scout then has to wait to see whether more keys follow). The
 default bindings never do that, so only conflicts the config introduces are
 reported. The exit status is 1 when there are errors.
 
+### Home Manager
+
+The flake has a home-manager module (`homeManagerModules.default`, also
+`homeModules.default`) that installs scout and writes `scout.conf`:
+
+```nix
+{
+  imports = [ inputs.scout.homeManagerModules.default ];
+  programs.scout = {
+    enable = true;
+    settings = {
+      hidden = true;
+      sort = "modified";
+      font = "JetBrains Mono";
+      font-size = 11;
+      editor = "nvim";
+    };
+    bookmarks = {          # g<key> goes to the folder
+      w = "~/work";
+      n = "~/notes";
+    };
+    keybindings = {
+      "<C-t>" = "terminal";
+      q = null;            # null removes a default binding
+    };
+    extraConfig = ''
+      map gx open
+    '';
+  };
+}
+```
+
+The package defaults to `pkgs.scout` when scout's overlay provides it, and to
+the flake's own package otherwise. The generated file is run through
+`scout --check-config` while it builds, so a config with errors fails the
+build with the report in the log. With nothing configured, the module leaves
+an existing `scout.conf` alone.
+
 ## Desktop integration
 
 `scout --service` is a D-Bus service that owns two names. D-Bus starts it on

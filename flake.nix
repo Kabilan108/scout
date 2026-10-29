@@ -2,9 +2,18 @@
   description = "scout: a keyboard-first, ranger-style file manager for Wayland, built on Qt 6";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # Only the flake checks use it, to evaluate the home-manager module.
+  inputs.home-manager = {
+    url = "github:nix-community/home-manager";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      home-manager,
+    }:
     let
       systems = [
         "x86_64-linux"
@@ -18,6 +27,9 @@
         scout = final.callPackage ./package.nix { inherit commit; };
       };
 
+      homeManagerModules.default = import ./nix/hm-module.nix self;
+      homeModules.default = self.homeManagerModules.default;
+
       packages = forAllSystems (pkgs: {
         scout = pkgs.callPackage ./package.nix { inherit commit; };
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.scout;
@@ -30,9 +42,13 @@
         };
       });
 
-      checks = forAllSystems (pkgs: {
-        scout = self.packages.${pkgs.stdenv.hostPlatform.system}.scout;
-      });
+      checks = forAllSystems (
+        pkgs:
+        {
+          scout = self.packages.${pkgs.stdenv.hostPlatform.system}.scout;
+        }
+        // import ./nix/checks.nix { inherit self home-manager pkgs; }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
