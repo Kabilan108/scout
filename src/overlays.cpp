@@ -670,7 +670,7 @@ int KeyMapSheet::groupHeight(const Group &group) const {
     return card::headerHeight() - 4 + lines * lineHeight() + 8;
 }
 
-int KeyMapSheet::introHeight() const { return 2 * lineHeight() + 10; }
+int KeyMapSheet::introHeight() const { return 3 * lineHeight() + 10; }
 
 QList<KeyMapSheet::Placed> KeyMapSheet::place(int width, int *height) const {
     constexpr int gap = 12;
@@ -738,8 +738,10 @@ void KeyMapSheet::paintEvent(QPaintEvent *) {
     };
     int x = body.left() + pad;
     drawRun(x, QStringLiteral("How keys work: "), pal.text);
-    drawRun(x, QStringLiteral("a single key acts on the cursor, or on the marks if there are any; a number first repeats (5j)"),
-            pal.subtext);
+    drawRun(x, QStringLiteral("a key acts on the cursor, or on the marked items if there are any."), pal.subtext);
+    y += lineHeight();
+    x = body.left() + pad;
+    drawRun(x, QStringLiteral("A number first repeats it (5j). Prefix keys open a family:"), pal.subtext);
     y += lineHeight();
     x = body.left() + pad;
     for (int i = 0; i < m_families.size(); ++i) {

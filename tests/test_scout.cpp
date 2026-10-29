@@ -830,7 +830,7 @@ private slots:
         QVERIFY(!tabEntries().join(u' ').contains(QStringLiteral("Alt-5")));
         QCOMPARE(titles.mid(0, 9), (QStringList{QStringLiteral("Move"), QStringLiteral("Go"), QStringLiteral("Select"),
                                                QStringLiteral("Copy & move"), QStringLiteral("Remove & undo"),
-                                               QStringLiteral("Change"), QStringLiteral("Find"), QStringLiteral("View"),
+                                               QStringLiteral("Open & change"), QStringLiteral("Find"), QStringLiteral("View"),
                                                QStringLiteral("Tabs")}));
         QVERIFY2(copyKeys.contains(QStringLiteral("Ctrl-y")) && !copyKeys.contains(QStringLiteral("yy")), qPrintable(copyKeys));
         QVERIFY(w.rect().contains(w.keyMapSheet()->geometry()));
