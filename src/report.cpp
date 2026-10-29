@@ -111,21 +111,24 @@ QString report::build(const Environment &env, const CommandRegistry &commands, c
     body += configSection(env.configPath, commands, defaults);
     body += u'\n';
 
+    qsizetype crashStart = 0;
+    QStringList crash = lastCrash(log.value_or(QStringList()), &crashStart);
+    QString crashSource = env.logPath;
     qsizetype tailStart = 0;
     if (!log) {
         body += QFile::exists(env.logPath) ? QStringLiteral("log: can't read %1\n").arg(env.logPath)
                                            : QStringLiteral("log: none at %1\n").arg(env.logPath);
     } else {
         tailStart = std::max<qsizetype>(0, log->size() - kTailLines);
+        // Frames of the crash printed in full below would only repeat it here, without its first line.
+        if (!crash.isEmpty() && crashStart < tailStart)
+            tailStart = std::max(tailStart, crashStart + crash.size());
         body += QStringLiteral("log: %1, last %2\n").arg(env.logPath, count(log->size() - tailStart, "line"));
         for (qsizetype i = tailStart; i < log->size(); ++i)
             body += log->at(i) + u'\n';
     }
 
-    qsizetype crashStart = 0;
-    QStringList crash = lastCrash(log.value_or(QStringList()), &crashStart);
     const bool crashInTail = !crash.isEmpty() && crashStart >= tailStart;
-    QString crashSource = env.logPath;
     if (crash.isEmpty()) {
         crash = lastCrash(rotated, &crashStart);
         crashSource = rotatedPath;

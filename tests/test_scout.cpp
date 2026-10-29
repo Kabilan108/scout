@@ -2195,6 +2195,34 @@ private slots:
         QVERIFY2(r.contains(QStringLiteral("\nmost recent crash, from ~/.local/state/scout/scout.log.1 line 67:\n"
                                            "2026-10-28 19:20:01.234 [9] F crash: signal 6 (SIGABRT), backtrace follows\nscout(+0x1) [0x1]\n```\n")),
                  qPrintable(r));
+
+        // When the last 50 lines start inside the crash shown below, its frames aren't repeated.
+        auto crashWithFrames = [&](int pid, int frames) {
+            QByteArray out = line(pid, QStringLiteral("F crash: signal 11 (SIGSEGV), backtrace follows"));
+            for (int i = 0; i < frames; ++i)
+                out += QStringLiteral("scout(frame%1_%2+0x1) [0x1]\n").arg(pid).arg(i).toUtf8();
+            return out;
+        };
+        log = line(12, QStringLiteral("I start")) + crashWithFrames(12, 10);
+        for (int i = 0; i < 45; ++i)
+            log += line(13, QStringLiteral("I after %1").arg(i));
+        writeFile(env.logPath, log);
+        r = build();
+        QVERIFY2(r.contains(QStringLiteral("\nlog: ~/.local/state/scout/scout.log, last 45 lines\n2026-10-28 19:20:01.234 [13] I after 0\n")),
+                 qPrintable(r));
+        QCOMPARE(r.count(QStringLiteral("frame12_9")), 1);
+        QVERIFY2(r.contains(QStringLiteral("\nmost recent crash, from ~/.local/state/scout/scout.log line 2:\n")), qPrintable(r));
+
+        // An older crash's frames stay: nothing else in the report shows them.
+        log = line(14, QStringLiteral("I start")) + crashWithFrames(14, 10);
+        for (int i = 0; i < 44; ++i)
+            log += line(15, QStringLiteral("I after %1").arg(i));
+        log += crashWithFrames(15, 1);
+        writeFile(env.logPath, log);
+        r = build();
+        QVERIFY2(r.contains(QStringLiteral("\nlog: ~/.local/state/scout/scout.log, last 50 lines\nscout(frame14_6+0x1) [0x1]\n")), qPrintable(r));
+        QVERIFY(r.contains(QStringLiteral("scout(frame15_0+0x1) [0x1]\n```\n")));
+        QVERIFY(!r.contains(QStringLiteral("most recent crash")));
     }
 
     void debugReportFromCommandLineAndPalette() {
