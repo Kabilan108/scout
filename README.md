@@ -150,6 +150,32 @@ map <C-t> terminal
 unmap q
 ```
 
+`set` takes `hidden`, `dirs-first`, `reverse` and `preview` (`true`, `false`
+or `toggle`), `sort` (`name`, `size`, `modified`, `extension`, optionally
+followed by `reverse`), `theme` (`auto`, `dark`, `light`), `font`,
+`font-size` (6 to 32) and `editor`.
+
+Problems show up in the status bar at startup and in the log. To check a
+config without starting scout:
+
+```console
+$ scout --check-config            # or: scout --check-config path/to/scout.conf
+scout.conf: /home/you/.config/scout/scout.conf
+info:
+  line 7: map gd overrides the default gd (cd /home/you/downloads)
+  line 9: unmap q removes the default q (close-tab)
+errors:
+  line 3: unknown command frobnicate
+  line 8: map g is a prefix of other bindings (g/, gb, gc, gd, gf, gg and 6 more), so it only runs after a pause
+2 errors
+```
+
+Errors are unknown commands (inside `map` too), unknown keys, unknown `set`
+options or bad values, and bindings that are a prefix of another binding or
+extend one (scout then has to wait to see whether more keys follow). The
+default bindings never do that, so only conflicts the config introduces are
+reported. The exit status is 1 when there are errors.
+
 ## Desktop integration
 
 `scout --service` is a D-Bus service that owns two names. D-Bus starts it on

@@ -1,3 +1,4 @@
+#include "config.h"
 #include "logging.h"
 #include "mainwindow.h"
 #include "service.h"
@@ -15,7 +16,7 @@ namespace {
 // Options that print something and exit don't belong in scout.log.
 bool isCommandLineTool(int argc, char *argv[]) {
     for (int i = 1; i < argc; ++i)
-        for (const char *flag : {"--version", "-v", "--help", "-h", "--help-all"})
+        for (const char *flag : {"--version", "-v", "--help", "-h", "--help-all", "--check-config"})
             if (std::strcmp(argv[i], flag) == 0)
                 return true;
     return false;
@@ -63,7 +64,17 @@ int main(int argc, char *argv[]) {
     QCommandLineOption serviceMode(QStringLiteral("service"),
                                    QStringLiteral("Run the D-Bus service: org.freedesktop.FileManager1 and the file chooser portal."));
     parser.addOption(serviceMode);
+    QCommandLineOption checkConfig(QStringLiteral("check-config"),
+                                   QStringLiteral("Check the config (or the file given as the path) without opening a window; "
+                                                  "exits with 1 if it has errors."));
+    parser.addOption(checkConfig);
     parser.process(app);
+
+    if (parser.isSet(checkConfig)) {
+        const QStringList paths = parser.positionalArguments();
+        QTextStream out(stdout);
+        return startup::checkConfig(paths.isEmpty() ? config::defaultPath() : paths.first(), !paths.isEmpty(), out);
+    }
 
     const bool service = parser.isSet(serviceMode);
     if (logToFile)

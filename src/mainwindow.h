@@ -54,6 +54,9 @@ public:
     TaskManager *tasks() { return &m_tasks; }
     Marks *marks() { return &m_marks; }
     KeyMap *keymap() { return &m_keys; }
+    // The bindings before scout.conf ran.
+    const KeyMap &defaultKeys() const { return m_defaultKeys; }
+    const CommandRegistry &commands() const { return m_commands; }
     const ViewOptions &options() const { return m_options; }
     bool isIdle() const;
 
@@ -259,6 +262,7 @@ private:
 
     TaskManager m_tasks;
     KeyMap m_keys;
+    KeyMap m_defaultKeys;
     CommandRegistry m_commands;
     QTimer m_previewTimer;
     QTimer m_whichKeyTimer;

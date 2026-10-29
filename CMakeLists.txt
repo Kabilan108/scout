@@ -54,6 +54,7 @@ add_library(scoutcore STATIC
   src/buildinfo.cpp
   src/state.cpp
   src/startup.cpp
+  src/config.cpp
 )
 set_source_files_properties(src/buildinfo.cpp PROPERTIES COMPILE_DEFINITIONS "SCOUT_COMMIT=\"${SCOUT_COMMIT}\"")
 target_include_directories(scoutcore PUBLIC src)

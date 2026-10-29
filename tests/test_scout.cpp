@@ -1,5 +1,6 @@
 #include "clipboard.h"
 #include "commands.h"
+#include "config.h"
 #include "desktopentry.h"
 #include "dirmodel.h"
 #include "fileops.h"
@@ -1522,6 +1523,105 @@ private slots:
         const auto w = startup::openWindow({}, false);
         QCOMPARE(w->tabCount(), 1);
         QCOMPARE(w->cwd(), QDir::homePath());
+    }
+
+    void defaultBindingsNeverShadowEachOther() {
+        MainWindow w(m_root.path(), false);
+        const QList<Binding> all = w.defaultKeys().bindings();
+        for (const Binding &a : all)
+            for (const Binding &b : all)
+                QVERIFY2(a.keys == b.keys || b.keys.mid(0, a.keys.size()) != a.keys,
+                         qPrintable(a.keys.join(QString()) + QStringLiteral(" / ") + b.keys.join(QString())));
+        QVERIFY(std::none_of(all.begin(), all.end(), [](const Binding &b) { return b.fromConfig; }));
+        QVERIFY(config::analyze(QString(), w.commands(), w.defaultKeys()).errors.isEmpty());
+    }
+
+    void configCheckFindsErrorsAndOverrides() {
+        MainWindow w(m_root.path(), false);
+        const ConfigReport r = config::analyze(QStringLiteral("# a comment\n"
+                                                              "set hidden yes\n"
+                                                              "set hidden maybe\n"
+                                                              "set colour red\n"
+                                                              "bogus\n"
+                                                              "map gd cd /tmp\n"
+                                                              "map g cd ~\n"
+                                                              "map ggx top\n"
+                                                              "map zz nope\n"
+                                                              "map <Foo> top\n"
+                                                              "unmap q\n"
+                                                              "unmap zq\n"
+                                                              "map <C-y> 'set theme pink'\n"
+                                                              // One error per pair, at the later line.
+                                                              "map ab top\n"
+                                                              "map a down\n"
+                                                              "mkdir\n"),
+                                               w.commands(), w.defaultKeys());
+        const QStringList expected = {
+            QStringLiteral("line 3: hidden takes true, false or toggle, not maybe"),
+            QStringLiteral("line 4: unknown option: colour"),
+            QStringLiteral("line 5: unknown command bogus"),
+            QStringLiteral("line 7: map g is a prefix of other bindings (g/, gb, gc, gd, gf, gg and 6 more), so it only runs after a pause"),
+            QStringLiteral("line 8: map ggx starts with g, which is bound on its own, so g only runs after a pause"),
+            QStringLiteral("line 8: map ggx starts with gg, which is bound on its own, so gg only runs after a pause"),
+            QStringLiteral("line 9: map zz: unknown command nope"),
+            QStringLiteral("line 10: map <Foo>: unknown key <Foo>"),
+            QStringLiteral("line 13: map <C-y>: theme takes auto, dark or light"),
+            QStringLiteral("line 15: map a is a prefix of other bindings (ab), so it only runs after a pause"),
+            QStringLiteral("line 16: mkdir needs <name>"),
+        };
+        QCOMPARE(r.errors, expected);
+        QCOMPARE(r.notes, (QStringList{
+                              QStringLiteral("line 6: map gd overrides the default gd (%1)").arg(w.defaultKeys().binding(QStringLiteral("gd"))->command),
+                              QStringLiteral("line 11: unmap q removes the default q (close-tab)"),
+                              QStringLiteral("line 12: unmap zq does nothing; zq isn't bound"),
+                              QStringLiteral("line 15: map a overrides the default a (create)"),
+                          }));
+        QCOMPARE(r.lines.size(), 15);
+        QVERIFY(r.lines[0].run);
+        QVERIFY(!r.lines[1].run);
+        QVERIFY(r.lines[6].run); // shadowing still binds
+
+        const QString good = m_root.path() + QStringLiteral("/good.conf"), bad = m_root.path() + QStringLiteral("/bad.conf");
+        writeFile(good, "set sort modified reverse\nmap gw cd '~/my work'\nunmap gr\n");
+        writeFile(bad, "set sort sideways\n");
+        auto check = [](const QStringList &args, int *code) {
+            QProcess p;
+            p.start(QCoreApplication::applicationDirPath() + QStringLiteral("/scout"), QStringList{QStringLiteral("--check-config")} + args);
+            p.waitForFinished(60000);
+            *code = p.exitStatus() == QProcess::NormalExit ? p.exitCode() : -1;
+            return QString::fromUtf8(p.readAllStandardOutput());
+        };
+        int code = 0;
+        QString out = check({good}, &code);
+        QCOMPARE(code, 0);
+        QCOMPARE(out, QStringLiteral("scout.conf: %1\ninfo:\n  line 3: unmap gr removes the default gr (cd ~/repos)\nno errors\n").arg(good));
+        out = check({bad}, &code);
+        QCOMPARE(code, 1);
+        QCOMPARE(out, QStringLiteral("scout.conf: %1\nerrors:\n  line 1: sort takes name, size, modified or extension, then optionally reverse\n1 error\n").arg(bad));
+        out = check({m_root.path() + QStringLiteral("/missing.conf")}, &code);
+        QCOMPARE(code, 1);
+        // Without a file it checks the usual config, which these tests don't have.
+        out = check({}, &code);
+        QCOMPARE(code, 0);
+        QVERIFY2(out.startsWith(QStringLiteral("no config at ")), qPrintable(out));
+    }
+
+    void configErrorsReachStatusBarAndLog() {
+        const QString log = m_root.path() + QStringLiteral("/log-config/scout.log");
+        QVERIFY(logging::open(log));
+        const QString conf = qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/scout/scout.conf");
+        writeFile(conf, "bogus\nmap gw cd /tmp\nset preview nah\n");
+        MainWindow w(m_root.path(), true);
+        const QString message = QStringLiteral("scout.conf: line 1: unknown command bogus; line 3: preview takes true, false or toggle, not nah");
+        QCOMPARE(w.statusBar()->message(), message);
+        QVERIFY(readAll(log).contains(QStringLiteral("] E ") + message));
+        QVERIFY(w.keymap()->isFromConfig(QStringLiteral("gw")));
+        QVERIFY(!w.keymap()->isFromConfig(QStringLiteral("j")));
+        w.runCommandLine(QStringLiteral("map gq cd /"));
+        QVERIFY(w.keymap()->binding(QStringLiteral("gq")));
+        QVERIFY(!w.keymap()->isFromConfig(QStringLiteral("gq")));
+        logging::close();
+        QVERIFY(QFile::remove(conf));
     }
 
     void logWritesLinesAndRotates() {

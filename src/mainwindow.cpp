@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 
+#include "config.h"
 #include "desktopentry.h"
 #include "fuzzy.h"
 #include "launcher.h"
@@ -134,6 +135,7 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
     buildUi();
     registerCommands();
     bindDefaults();
+    m_defaultKeys = m_keys;
     if (m_loadUserConfig)
         loadConfig();
     applyTheme();
@@ -1859,6 +1861,10 @@ void MainWindow::registerCommands() {
     cmd(QStringLiteral("set"), QStringLiteral("Change an option"), [this](const CommandContext &c) {
         const QString key = c.args.value(0);
         const QString value = c.args.mid(1).join(u' ');
+        if (const QString problem = config::checkOption(key, value); !problem.isEmpty()) {
+            error(problem);
+            return;
+        }
         if (key == QLatin1String("hidden")) {
             m_options.showHidden = parseBool(value, m_options.showHidden);
             applyOptions();
@@ -1899,17 +1905,8 @@ void MainWindow::registerCommands() {
             error(QStringLiteral("usage: map <keys> <command>"));
             return;
         }
-        // `map gw 'cd ~/work'` and `map gw cd ~/work` mean the same thing.
-        QString command;
-        if (c.args.size() == 2) {
-            command = c.args[1];
-        } else {
-            QStringList rest;
-            for (const QString &a : c.args.mid(1))
-                rest << CommandRegistry::quote(a);
-            command = rest.join(u' ');
-        }
-        m_keys.bind(c.args.first(), command, command);
+        const QString command = config::mapCommand(c.args);
+        m_keys.bind(c.args.first(), command, command, m_loadingConfig);
     }, QStringLiteral("<keys> <command>"), true);
     cmd(QStringLiteral("unmap"), QStringLiteral("Remove a key binding"),
         [this](const CommandContext &c) { m_keys.unbind(c.args.value(0)); }, QStringLiteral("<keys>"), true);
@@ -2038,30 +2035,17 @@ void MainWindow::bindDefaults() {
 }
 
 void MainWindow::loadConfig() {
-    const QString path = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
-                         QStringLiteral("/scout/scout.conf");
-    QFile f(path);
+    QFile f(config::defaultPath());
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return;
-    QTextStream in(&f);
-    int lineNo = 0;
-    QStringList problems;
-    while (!in.atEnd()) {
-        ++lineNo;
-        const QString line = in.readLine().trimmed();
-        if (line.isEmpty() || line.startsWith(u'#'))
-            continue;
-        const QString name = CommandRegistry::split(line).value(0);
-        if (!m_commands.find(name)) {
-            problems << QStringLiteral("line %1: unknown command %2").arg(lineNo).arg(name);
-            continue;
-        }
-        m_loadingConfig = true;
-        runCommandLine(line);
-        m_loadingConfig = false;
-    }
-    if (!problems.isEmpty())
-        error(QStringLiteral("scout.conf: ") + problems.join(QStringLiteral("; ")));
+    const ConfigReport report = config::analyze(QString::fromUtf8(f.readAll()), m_commands, m_defaultKeys);
+    m_loadingConfig = true;
+    for (const ConfigLine &line : report.lines)
+        if (line.run)
+            runCommandLine(line.text);
+    m_loadingConfig = false;
+    if (!report.errors.isEmpty())
+        error(QStringLiteral("scout.conf: ") + report.errors.join(QStringLiteral("; ")));
 }
 
 // Tabs
