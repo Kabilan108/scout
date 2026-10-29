@@ -1541,7 +1541,7 @@ private slots:
         const QString base = makeTree();
         TaskManager tasks;
         QSignalSpy finished(&tasks, &TaskManager::taskFinished);
-        tasks.start(Task::Move, {other.path() + QStringLiteral("/pkg")}, base + QStringLiteral("/beta"));
+        Task *move = tasks.start(Task::Move, {other.path() + QStringLiteral("/pkg")}, base + QStringLiteral("/beta"));
         // Add a file to the source while the copy is under way.
         bool added = false;
         QElapsedTimer clock;
@@ -1564,7 +1564,18 @@ private slots:
         QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/late.txt")));
         QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/dir/marker")) ||
                 QFile::exists(base + QStringLiteral("/beta/pkg/dir/marker")));
-        QVERIFY(!QFile::exists(other.path() + QStringLiteral("/pkg/f0.bin")));
+        const QStringList errors = move->progress().errors;
+        if (!QFileInfo::exists(base + QStringLiteral("/beta/pkg"))) {
+            // The copy reached "dir" in the instant it didn't exist and gave up:
+            // the source must be whole and no partial copy left behind.
+            QVERIFY2(errors.join(u';').contains(QStringLiteral("/pkg/dir")), qPrintable(errors.join(u';')));
+            for (int i = 0; i < 32; ++i)
+                QVERIFY(QFile::exists(other.path() + QStringLiteral("/pkg/f%1.bin").arg(i)));
+            QCOMPARE(QDir(base + QStringLiteral("/beta")).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden),
+                     QStringList());
+            return;
+        }
+        QVERIFY2(!QFile::exists(other.path() + QStringLiteral("/pkg/f0.bin")), qPrintable(errors.join(u';')));
         QVERIFY(QFile::exists(base + QStringLiteral("/beta/pkg/f31.bin")));
     }
 
