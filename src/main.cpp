@@ -16,7 +16,7 @@ namespace {
 // Options that print something and exit don't belong in scout.log.
 bool isCommandLineTool(int argc, char *argv[]) {
     for (int i = 1; i < argc && std::strcmp(argv[i], "--") != 0; ++i)
-        for (const char *flag : {"--version", "-v", "--help", "-h", "--help-all", "--check-config"})
+        for (const char *flag : {"--version", "-v", "--help", "-h", "--help-all", "--check-config", "--report"})
             if (std::strcmp(argv[i], flag) == 0)
                 return true;
     return false;
@@ -46,10 +46,11 @@ int main(int argc, char *argv[]) {
         qunsetenv("QT_PLUGIN_PATH");
     for (const QString &dir : pluginDirs)
         QCoreApplication::addLibraryPath(dir);
+    const QByteArray windowPlatform = startup::windowPlatform();
     if (!logToFile)
         qputenv("QT_QPA_PLATFORM", "offscreen"); // works without a display
-    else if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
-        qputenv("QT_QPA_PLATFORM", "wayland;xcb");
+    else if (!windowPlatform.isEmpty())
+        qputenv("QT_QPA_PLATFORM", windowPlatform);
     // Our own palette and Fusion style; a desktop platform theme would fight them.
     qunsetenv("QT_QPA_PLATFORMTHEME");
     qunsetenv("QT_STYLE_OVERRIDE");
@@ -73,7 +74,15 @@ int main(int argc, char *argv[]) {
                                    QStringLiteral("Check the config (or the file given as the path) without opening a window; "
                                                   "exits with 1 if it has errors."));
     parser.addOption(checkConfig);
+    QCommandLineOption debugReport(QStringLiteral("report"),
+                                   QStringLiteral("Print a debug report to paste into a bug report, without opening a window."));
+    parser.addOption(debugReport);
     parser.process(app);
+
+    if (parser.isSet(debugReport)) {
+        QTextStream out(stdout);
+        return startup::printReport(windowPlatform, out);
+    }
 
     if (parser.isSet(checkConfig)) {
         const QStringList paths = parser.positionalArguments();

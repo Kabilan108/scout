@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(scout VERSION 0.3.2 LANGUAGES CXX)
+project(scout VERSION 0.3.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,6 +55,7 @@ add_library(scoutcore STATIC
   src/state.cpp
   src/startup.cpp
   src/config.cpp
+  src/report.cpp
 )
 set_source_files_properties(src/buildinfo.cpp PROPERTIES COMPILE_DEFINITIONS "SCOUT_COMMIT=\"${SCOUT_COMMIT}\"")
 target_include_directories(scoutcore PUBLIC src)

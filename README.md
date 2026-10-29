@@ -319,6 +319,17 @@ show function names. `SIGTERM`, `SIGHUP` and `SIGINT` are logged too.
 
 `scout --version` prints the version and the git commit it was built from.
 
+## Reporting a bug
+
+Run `scout --report` and attach its output to the issue. It prints one
+Markdown block: the version and commit, the Qt version and platform plugin,
+`XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE`, the `--check-config` summary,
+the last 50 lines of `scout.log`, and the most recent crash backtrace even when
+it is older than those lines. It needs no display. "Copy debug report" in the
+palette (`Ctrl-k`) copies the same block. Other paths under your home folder
+show as `~/…` and no other environment variables are included, but read the
+block before you post it.
+
 ## Not done yet
 
 - Chooser windows open as ordinary windows rather than attached to the app

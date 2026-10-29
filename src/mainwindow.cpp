@@ -5,6 +5,7 @@
 #include "fuzzy.h"
 #include "launcher.h"
 #include "logging.h"
+#include "report.h"
 #include "state.h"
 #include "theme.h"
 
@@ -2156,6 +2157,10 @@ void MainWindow::registerCommands() {
     cmd(QStringLiteral("copy-dir"), QStringLiteral("Copy this folder's path as text"), [this](const CommandContext &) {
         setClipboardText(m_cwd);
         message(QStringLiteral("copied %1").arg(tilde(m_cwd)));
+    });
+    cmd(QStringLiteral("copy-debug-report"), QStringLiteral("Copy debug report"), [this](const CommandContext &) {
+        setClipboardText(report::build(report::current(QGuiApplication::platformName()), m_commands, m_defaultKeys));
+        message(QStringLiteral("copied the debug report; paste it into a bug report"));
     });
 
     // Finding things

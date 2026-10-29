@@ -16,6 +16,7 @@ target (`org.freedesktop.FileManager1`).
   portal. D-Bus starts it on demand.
 - `src/config.cpp`: `scout.conf` and `scout --check-config`. `src/state.cpp`:
   remembered zoom and tabs. `src/logging.cpp`: `scout.log` and the crash handler.
+  `src/report.cpp`: the debug report (`scout --report`), which redacts home paths.
 - `src/overlays.cpp`: the `card` helpers every popup is drawn with.
 - `nix/hm-module.nix`: `programs.scout` for home-manager.
 - `tools/harness/`: headless verification against the real binary.

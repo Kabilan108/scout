@@ -27,7 +27,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "scout";
-  version = "0.3.2";
+  version = "0.3.3";
 
   src = lib.fileset.toSource {
     root = ./.;

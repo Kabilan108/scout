@@ -18,4 +18,12 @@ std::unique_ptr<MainWindow> openWindow(const QStringList &paths, bool loadUserCo
 // exit status, 1 if the config has errors. Needs a QApplication but shows nothing.
 int checkConfig(const QString &path, bool explicitPath, QTextStream &out);
 
+// The QT_QPA_PLATFORM a window starts with: the user's, or Wayland with X11 as
+// the fallback when there is a compositor. Empty leaves Qt's default.
+QByteArray windowPlatform();
+
+// `scout --report`: prints the debug report to `out`. Needs a QApplication but
+// shows nothing, so `windowPlatform` is what a window would have used.
+int printReport(const QByteArray &windowPlatform, QTextStream &out);
+
 } // namespace startup

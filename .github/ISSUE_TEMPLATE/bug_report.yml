@@ -1,0 +1,21 @@
+name: Bug report
+description: Something in scout broke or crashed.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what scout did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Debug report
+      description: |
+        Paste the output of `scout --report`, or use "Copy debug report" in the palette (Ctrl-k).
+        It includes the end of scout.log; paths under your home folder show as `~/…`, but read it before posting.
+      placeholder: "```text\nscout 0.3.3 (abc1234)\n...\n```"
+    validations:
+      required: true

@@ -10,12 +10,14 @@
 #include "logging.h"
 #include "mainwindow.h"
 #include "preview.h"
+#include "report.h"
 #include "service.h"
 #include "startup.h"
 #include "state.h"
 #include "theme.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDBusArgument>
 #include <QDir>
 #include <QElapsedTimer>
@@ -2096,6 +2098,119 @@ private slots:
         QVERIFY2(log.contains(QStringLiteral("] F crash: signal 11 (SIGSEGV), backtrace follows")), qPrintable(log));
         // backtrace_symbols_fd lines: "binary(symbol+0x..) [0x...]".
         QVERIFY2(log.contains(QStringLiteral("scout_tests(")) && log.contains(QStringLiteral(") [0x")), qPrintable(log));
+    }
+
+    void debugReportRedactsHomePaths() {
+        const QString home = QStringLiteral("/home/you");
+        const QStringList keep = {home + QStringLiteral("/.config/scout/scout.conf")};
+        auto redact = [&](const char *text) { return report::redactHome(QString::fromUtf8(text), home, keep); };
+        QCOMPARE(redact("window closed by q: /home/you/My Docs (2 tabs)"), QStringLiteral("window closed by q: ~/… (2 tabs)"));
+        QCOMPARE(redact("task failed: Copying a (/home/you/a b.txt, /home/you/c)"), QStringLiteral("task failed: Copying a (~/…, ~/…)"));
+        QCOMPARE(redact("can't read /home/you/tax 2025.pdf: Permission denied"), QStringLiteral("can't read ~/…: Permission denied"));
+        QCOMPARE(redact("args [/home/you/x, /home/you]"), QStringLiteral("args [~/…, ~]"));
+        QCOMPARE(redact("/home/you/repos/scout/build/scout(main+0x2) [0x1]"), QStringLiteral("~/…(main+0x2) [0x1]"));
+        QCOMPARE(redact("line 2: map gw cd ~/work, then cd ~"), QStringLiteral("line 2: map gw cd ~/…, then cd ~"));
+        QCOMPARE(redact("config: /home/you/.config/scout/scout.conf"), QStringLiteral("config: ~/.config/scout/scout.conf"));
+        QCOMPARE(redact("config: ~/.config/scout/scout.conf.bak"), QStringLiteral("config: ~/…"));
+        QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with /home/you/a b"),
+                 QStringLiteral("reading ~/.config/scout/scout.conf with ~/…"));
+        QCOMPARE(redact("/home/youth/x /nix/store/home/you/x a~/b"), QStringLiteral("/home/youth/x /nix/store/home/you/x a~/b"));
+    }
+
+    void debugReportSectionsCrashTraceAndMissingLog() {
+        const QString home = m_root.path() + QStringLiteral("/report-home");
+        const report::Environment env{QStringLiteral("wayland"), QStringLiteral("niri"), QString(), home,
+                                      home + QStringLiteral("/.config/scout/scout.conf"),
+                                      home + QStringLiteral("/.local/state/scout/scout.log")};
+        const MainWindow w(m_root.path(), false);
+        auto build = [&] {
+            const QString r = report::build(env, w.commands(), w.defaultKeys());
+            [&] { QVERIFY2(!r.contains(home), qPrintable(r)); }();
+            return r;
+        };
+
+        QString r = build();
+        QVERIFY2(r.startsWith(QStringLiteral("```text\nscout %1\nQt %2").arg(logging::versionString(), QLatin1String(qVersion()))), qPrintable(r));
+        QVERIFY(r.endsWith(QStringLiteral("\n```\n")));
+        QVERIFY2(r.contains(QStringLiteral("\nplatform: wayland\nXDG_CURRENT_DESKTOP: niri\nXDG_SESSION_TYPE: (unset)\n\n")), qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nconfig: none at ~/.config/scout/scout.conf, so scout uses its defaults\n")), qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nlog: none at ~/.local/state/scout/scout.log\n")), qPrintable(r));
+        QVERIFY(!r.contains(QStringLiteral("crash")));
+
+        writeFile(env.configPath, "bogus\nunmap gr\n");
+        auto line = [](int pid, const QString &text) {
+            return QStringLiteral("2026-10-28 19:20:01.234 [%1] %2\n").arg(pid).arg(text).toUtf8();
+        };
+        const QByteArray crash = line(7, QStringLiteral("F crash: signal 11 (SIGSEGV), backtrace follows")) +
+                                 "/nix/store/abc-scout/bin/scout(_ZN10MainWindow4tickEv+0x1a) [0x401000]\n" +
+                                 (home + QStringLiteral("/repos/scout/build/scout(main+0x2) [0x402000]\n")).toUtf8();
+        QByteArray log = line(7, QStringLiteral("I scout 0.3.2 (abc1234) starting: mode window, platform xcb, args []")) + crash;
+        for (int i = 0; i < 60; ++i)
+            log += line(8, QStringLiteral("I filler %1").arg(i));
+        log += line(8, QStringLiteral("E can't read %1/Secret Plans/tax 2025.pdf: Permission denied").arg(home));
+        log += line(8, QStringLiteral("I reading %1 with ``` inside").arg(env.configPath));
+        writeFile(env.logPath, log);
+        r = build();
+        QVERIFY2(r.startsWith(QStringLiteral("````text\n")) && r.endsWith(QStringLiteral("\n````\n")), qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nplatform: wayland, xcb at the last start in scout.log\n")), qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nconfig: ~/.config/scout/scout.conf\n1 error, 1 override\n  line 1: unknown command bogus\n\n")),
+                 qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nlog: ~/.local/state/scout/scout.log, last 50 lines\n")), qPrintable(r));
+        QVERIFY(r.contains(QStringLiteral("] I filler 12\n")));
+        QVERIFY(!r.contains(QStringLiteral("] I filler 11\n")));
+        QVERIFY2(r.contains(QStringLiteral("] E can't read ~/…: Permission denied\n")), qPrintable(r));
+        QVERIFY(!r.contains(QStringLiteral("Secret")));
+        QVERIFY(r.contains(QStringLiteral("] I reading ~/.config/scout/scout.conf with ``` inside\n")));
+        const QString trace = QStringLiteral("\nmost recent crash, from ~/.local/state/scout/scout.log line 2:\n"
+                                             "2026-10-28 19:20:01.234 [7] F crash: signal 11 (SIGSEGV), backtrace follows\n"
+                                             "/nix/store/abc-scout/bin/scout(_ZN10MainWindow4tickEv+0x1a) [0x401000]\n"
+                                             "~/…(main+0x2) [0x402000]\n````\n");
+        QVERIFY2(r.endsWith(trace), qPrintable(r));
+
+        // A crash among the last lines is shown there, once.
+        QFile f(env.logPath);
+        QVERIFY(f.open(QIODevice::Append));
+        f.write(line(9, QStringLiteral("F crash: signal 6 (SIGABRT), backtrace follows")) + "scout(+0x1) [0x1]\n" + line(10, QStringLiteral("I after")));
+        f.close();
+        r = build();
+        QCOMPARE(r.count(QStringLiteral("F crash")), 1);
+        QVERIFY(r.contains(QStringLiteral("] F crash: signal 6 (SIGABRT), backtrace follows\nscout(+0x1) [0x1]\n")));
+        QVERIFY(!r.contains(QStringLiteral("most recent crash")));
+
+        // After a rotation the crash may only be in scout.log.1.
+        QVERIFY(QFile::rename(env.logPath, env.logPath + QStringLiteral(".1")));
+        writeFile(env.logPath, line(11, QStringLiteral("I fresh")));
+        r = build();
+        QVERIFY2(r.contains(QStringLiteral("\nlog: ~/.local/state/scout/scout.log, last 1 line\n")), qPrintable(r));
+        QVERIFY2(r.contains(QStringLiteral("\nmost recent crash, from ~/.local/state/scout/scout.log.1 line 67:\n"
+                                           "2026-10-28 19:20:01.234 [9] F crash: signal 6 (SIGABRT), backtrace follows\nscout(+0x1) [0x1]\n```\n")),
+                 qPrintable(r));
+    }
+
+    void debugReportFromCommandLineAndPalette() {
+        QProcess p;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        for (const char *name : {"WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM"})
+            env.remove(QLatin1String(name));
+        const QString state = m_root.path() + QStringLiteral("/report-cli/state");
+        env.insert(QStringLiteral("XDG_CONFIG_HOME"), m_root.path() + QStringLiteral("/report-cli/config"));
+        env.insert(QStringLiteral("XDG_STATE_HOME"), state);
+        p.setProcessEnvironment(env);
+        p.start(QCoreApplication::applicationDirPath() + QStringLiteral("/scout"), {QStringLiteral("--report")});
+        QVERIFY(p.waitForFinished(60000));
+        const QString out = QString::fromUtf8(p.readAllStandardOutput());
+        QCOMPARE(p.exitStatus(), QProcess::NormalExit);
+        QVERIFY2(p.exitCode() == 0, qPrintable(QString::fromUtf8(p.readAllStandardError())));
+        QVERIFY2(out.startsWith(QStringLiteral("```text\nscout ")) && out.endsWith(QStringLiteral("\n```\n")), qPrintable(out));
+        QVERIFY2(out.contains(QStringLiteral("\nplatform: Qt's default requested (--report runs without a display)\n")), qPrintable(out));
+        QVERIFY2(out.contains(QStringLiteral("\nconfig: none at ")) && out.contains(QStringLiteral("\nlog: none at ")), qPrintable(out));
+        QVERIFY(!QFileInfo::exists(state));
+
+        MainWindow w(m_root.path(), false);
+        w.runCommandLine(QStringLiteral("copy-debug-report"));
+        const QString copied = QGuiApplication::clipboard()->text();
+        QVERIFY2(copied.startsWith(QStringLiteral("```text\nscout ")), qPrintable(copied));
+        QVERIFY2(copied.contains(QStringLiteral("\nplatform: %1\n").arg(QGuiApplication::platformName())), qPrintable(copied));
     }
 
     void showItemsGroupsByFolder() {
