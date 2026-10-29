@@ -158,15 +158,18 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
     qsizetype i = 0;
     while (i < text.size()) {
         const bool atBoundary = i == 0 || !isPathChar(text[i - 1]) || QStringView(text).first(i).endsWith(u"file://");
+        const QStringView from = QStringView(text).sliced(i);
+        // A match counts only if the home ends there, not "/home/you" in "/home/youth".
+        auto endsHome = [&](qsizetype n) { return n == from.size() || from[n] == u'/' || !isPathChar(from[n]); };
         qsizetype prefix = 0;
-        if (atBoundary && matchHome && QStringView(text).sliced(i).startsWith(root))
+        if (atBoundary && matchHome && from.startsWith(root) && endsHome(root.size()))
             prefix = root.size();
-        else if (atBoundary && matchHome && encodedRoot != root && QStringView(text).sliced(i).startsWith(encodedRoot, Qt::CaseInsensitive))
+        else if (atBoundary && matchHome && from.startsWith(encodedRoot, Qt::CaseInsensitive) && endsHome(encodedRoot.size()))
             prefix = encodedRoot.size();
-        else if (atBoundary && text[i] == u'~')
+        else if (atBoundary && from.startsWith(u'~') && endsHome(1))
             prefix = 1;
         const qsizetype afterPrefix = i + prefix;
-        if (prefix == 0 || (afterPrefix < text.size() && text[afterPrefix] != u'/' && isPathChar(text[afterPrefix]))) {
+        if (prefix == 0) {
             out += text[i++];
             continue;
         }

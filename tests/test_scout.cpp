@@ -2119,6 +2119,8 @@ private slots:
         QCOMPARE(redact("/home/you/.config/scout/scout.conf (old)/Clients/Acme"), QStringLiteral("~/…"));
         QCOMPARE(report::redactHome(QStringLiteral("args [file:///home/you%20space/Clients/Acme]"), QStringLiteral("/home/you space"), {}),
                  QStringLiteral("args [file://~/…]"));
+        QCOMPARE(report::redactHome(QStringLiteral("args [file:///home/you%25/Clients/Acme]"), QStringLiteral("/home/you%"), {}),
+                 QStringLiteral("args [file://~/…]"));
         QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with ``` inside"),
                  QStringLiteral("reading ~/.config/scout/scout.conf with ``` inside"));
         QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with /home/you/a b"), QStringLiteral("reading ~/…"));
