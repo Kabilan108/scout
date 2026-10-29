@@ -39,7 +39,12 @@ int main(int argc, char *argv[]) {
         logging::installMessageHandler();
         logging::installCrashHandler();
     }
-    for (const QString &dir : QStringLiteral(SCOUT_PLUGIN_DIRS).split(u':', Qt::SkipEmptyParts))
+    // A packaged build carries its own plugin dirs. Plugins from another Qt version on
+    // QT_PLUGIN_PATH (a dev shell, say) would abort startup, so they're ignored.
+    const QStringList pluginDirs = QStringLiteral(SCOUT_PLUGIN_DIRS).split(u':', Qt::SkipEmptyParts);
+    if (!pluginDirs.isEmpty())
+        qunsetenv("QT_PLUGIN_PATH");
+    for (const QString &dir : pluginDirs)
         QCoreApplication::addLibraryPath(dir);
     if (!logToFile)
         qputenv("QT_QPA_PLATFORM", "offscreen"); // works without a display
