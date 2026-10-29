@@ -53,13 +53,17 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.scout ];
+          # sway, grim, wtype, dbus and the portal run tools/harness.
           packages = with pkgs; [
             clang-tools
+            dbus
             gdb
+            (lib.getBin glib)
             grim
             sway
             wtype
           ];
+          SCOUT_XDP = "${pkgs.xdg-desktop-portal}/libexec/xdg-desktop-portal";
           shellHook = ''
             export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}:${pkgs.qt6.qtwayland}/${pkgs.qt6.qtbase.qtPluginPrefix}:${pkgs.qt6.qtsvg}/${pkgs.qt6.qtbase.qtPluginPrefix}:${pkgs.qt6.qtimageformats}/${pkgs.qt6.qtbase.qtPluginPrefix}:${pkgs.kdePackages.kimageformats}/${pkgs.qt6.qtbase.qtPluginPrefix}"
           '';

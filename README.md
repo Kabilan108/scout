@@ -14,15 +14,11 @@ Inspired by rockorager's [Strider](https://github.com/rockorager).
 ## Run it
 
 ```sh
-nix run git+ssh://git@github.com/Kabilan108/scout                          # current directory
-nix run git+ssh://git@github.com/Kabilan108/scout -- ~/Downloads
-nix run git+ssh://git@github.com/Kabilan108/scout -- ~/Pictures/photo.jpg  # reveals the file
-nix run git+ssh://git@github.com/Kabilan108/scout --refresh                # pick up new commits
+nix run github:Kabilan108/scout                          # current directory
+nix run github:Kabilan108/scout -- ~/Downloads
+nix run github:Kabilan108/scout -- ~/Pictures/photo.jpg  # reveals the file
+nix run --refresh github:Kabilan108/scout                # pick up new commits
 ```
-
-The repository is private, so the `git+ssh` form is the one that works
-everywhere your SSH key does. If it is made public, `nix run github:Kabilan108/scout`
-works too.
 
 From a checkout: `nix run .` or `nix develop`, then
 `cmake -B build -G Ninja && cmake --build build && ./build/scout`.
