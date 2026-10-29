@@ -862,9 +862,10 @@ private slots:
         writeFile(base + QStringLiteral("/notes.md"), "# Notes, now longer\n");
         w.runCommandLine(QStringLiteral("reload"));
         QTRY_VERIFY(shelf->value(QStringLiteral("Size")).contains(QStringLiteral("20 bytes")));
-        // Marks turn it into a summary.
+        // One mark elsewhere doesn't pull the shelf away from the cursor; several marks get a summary.
         key(w, Qt::Key_Space);
         keys(w, QStringLiteral("gg"));
+        QTRY_COMPARE(shelf->title(), QStringLiteral("alpha"));
         key(w, Qt::Key_Space);
         QTRY_COMPARE(shelf->title(), QStringLiteral("2 items"));
         QTRY_VERIFY(shelf->value(QStringLiteral("Total size")).contains(QStringLiteral("32 bytes")));

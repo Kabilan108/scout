@@ -1132,7 +1132,13 @@ void MainWindow::toggleProperties() {
 
 void MainWindow::updateProperties() {
     m_shelf->setVisible(m_propertiesOpen);
-    const QStringList paths = targets();
+    // Several marks get a summary; otherwise the shelf describes the cursor, even
+    // with a single mark somewhere else, since it's a pane that follows the cursor.
+    QStringList paths;
+    if (m_marks.size() > 1)
+        paths = m_marks.paths();
+    else if (const FileEntry *e = currentEntry())
+        paths << e->path;
     const QString key = paths.join(u'\n');
     if (!m_propertiesOpen || key == m_propertiesKey)
         return;
