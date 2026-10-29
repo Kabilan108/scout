@@ -9,6 +9,7 @@
 #include "launcher.h"
 #include "logging.h"
 #include "mainwindow.h"
+#include "preview.h"
 #include "service.h"
 #include "startup.h"
 #include "state.h"
@@ -310,6 +311,34 @@ private slots:
         tasks.start(Task::Delete, {dest + QStringLiteral("/alpha")});
         QTRY_COMPARE(finished.size(), 6);
         QVERIFY(!QFileInfo::exists(dest + QStringLiteral("/alpha")));
+    }
+
+    void switchingHighlightedPreviewsIsSafe() {
+        // Changing the syntax definition re-highlights the old text and queues work
+        // that points into it; replacing the text must not leave that work dangling.
+        const QString base = makeTree();
+        QByteArray cpp, md, py;
+        for (int i = 0; i < 200; ++i) {
+            cpp += "/* comment " + QByteArray::number(i) + "\nstill comment */ int x" + QByteArray::number(i) + " = 1;\n";
+            md += "# Heading " + QByteArray::number(i) + "\n\n```\ncode\n```\n";
+            py += "s = \"\"\"doc " + QByteArray::number(i) + "\nmore\"\"\"\n";
+        }
+        writeFile(base + QStringLiteral("/a.cpp"), cpp);
+        writeFile(base + QStringLiteral("/b.md"), md);
+        writeFile(base + QStringLiteral("/c.py"), py);
+        Marks marks;
+        Preview preview(&marks);
+        preview.resize(600, 400);
+        preview.show();
+        const QStringList files = {QStringLiteral("/a.cpp"), QStringLiteral("/b.md"), QStringLiteral("/c.py")};
+        for (int round = 0; round < 30; ++round) {
+            preview.showEntry(statEntry(base + files[round % 3]));
+            if (round % 2)
+                QCoreApplication::processEvents();
+        }
+        QTest::qWait(50);
+        QVERIFY(preview.text().contains(QStringLiteral("Heading")) || preview.text().contains(QStringLiteral("doc")) ||
+                preview.text().contains(QStringLiteral("comment")));
     }
 
     void navigationAndPreview() {

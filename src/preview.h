@@ -73,6 +73,7 @@ public:
 
 private:
     void showText(const QString &text, const QString &path, bool highlight);
+    void replaceText(const QString &text, const KSyntaxHighlighting::Definition &def);
     void showImageAsync(const FileEntry &entry);
     void showArchiveAsync(const FileEntry &entry);
     void showProcessImage(const FileEntry &entry, const QString &program, const QStringList &args);

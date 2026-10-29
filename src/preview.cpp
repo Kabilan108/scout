@@ -429,10 +429,19 @@ void Preview::showText(const QString &text, const QString &path, bool highlight)
         if (!def.isValid())
             def = m_repo.definitionForMimeType(QMimeDatabase().mimeTypeForFile(path).name());
     }
-    m_highlighter->setDefinition(def);
-    m_text->setPlainText(text);
+    replaceText(text, def);
     m_text->verticalScrollBar()->setValue(0);
     setCurrentWidget(m_text);
+}
+
+void Preview::replaceText(const QString &text, const KSyntaxHighlighting::Definition &def) {
+    // KSyntaxHighlighting queues rehighlightBlock() calls that hold blocks of the
+    // current text; they must not outlive it. Emptying the document before the
+    // definition changes also keeps that change from re-highlighting old text.
+    QCoreApplication::removePostedEvents(m_highlighter, QEvent::MetaCall);
+    m_text->clear();
+    m_highlighter->setDefinition(def);
+    m_text->setPlainText(text);
 }
 
 void Preview::showInfo(const FileEntry &entry, const QString &note) {
@@ -468,14 +477,13 @@ void Preview::showImageAsync(const FileEntry &entry) {
 void Preview::showArchiveAsync(const FileEntry &entry) {
     m_kind = Kind::Text;
     const quint64 generation = m_generation;
-    m_highlighter->setDefinition({});
-    m_text->setPlainText(QStringLiteral("reading archive…"));
+    replaceText(QStringLiteral("reading archive…"), {});
     setCurrentWidget(m_text);
     QPointer<Preview> self(this);
     QtConcurrent::run([path = entry.path] { return listArchive(path); }).then(this, [self, generation](QString listing) {
         if (!self || generation != self->m_generation)
             return;
-        self->m_text->setPlainText(listing);
+        self->replaceText(listing, {});
     });
 }
 
