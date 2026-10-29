@@ -300,7 +300,7 @@ it moves to `scout.log.1` and a new file starts. Each line has a timestamp
 and the process id:
 
 ```
-2026-10-28 19:20:01.123 [4242] I scout 0.2.0 (8a6e817) starting: mode window, platform wayland, args []
+2026-10-28 19:20:01.123 [4242] I scout 0.3.0 (8a6e817) starting: mode window, platform wayland, args []
 2026-10-28 19:24:13.502 [4242] E no such directory: ~/nope
 2026-10-28 19:31:40.017 [4242] I window closed by close-tab on the last tab (key q): /home/you/repos (1 tab)
 2026-10-28 19:31:40.020 [4242] I exit status 0

@@ -410,6 +410,29 @@ private slots:
         QTRY_VERIFY(!QFile::exists(base + QStringLiteral("/renamed.md")));
     }
 
+    void paletteMarksKeysFromConfig() {
+        const QString conf = m_root.path() + QStringLiteral("/xdg-config/scout/scout.conf");
+        writeFile(conf, "map zw cd /tmp\n");
+        const QString base = makeTree();
+        MainWindow w(base, true);
+        QFile::remove(conf);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        QVERIFY(w.prompt()->isOpen());
+        bool marked = false, plain = false;
+        for (const PickerItem &item : w.picker()->items()) {
+            if (item.keys.contains(QStringLiteral("•zw")))
+                marked = true;
+            if (item.description == QLatin1String("copy") && item.keys.contains(QStringLiteral("yy")) &&
+                !item.keys.contains(u'•'))
+                plain = true;
+        }
+        QVERIFY(marked);
+        QVERIFY(plain);
+        key(w, Qt::Key_Escape);
+    }
+
     void filterFindAndCommands() {
         const QString base = makeTree();
         MainWindow w(base, false);

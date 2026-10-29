@@ -1742,7 +1742,8 @@ QList<PickerItem> MainWindow::commandItems(const QString &query) const {
     QHash<QString, QString> descriptions;
     QStringList withArgs;
     for (const Binding &b : bindingsByKeys(m_keys)) {
-        keys[b.command] << card::keyLabel(b.keys);
+        // A leading dot marks keys that come from scout.conf rather than the defaults.
+        keys[b.command] << (b.fromConfig ? QStringLiteral("•") : QString()) + card::keyLabel(b.keys);
         const QStringList parts = CommandRegistry::split(b.command);
         const bool bare = parts.size() == 1 && m_commands.find(parts.first());
         if (!bare && !withArgs.contains(b.command)) {
@@ -1896,7 +1897,10 @@ void MainWindow::updateCommandList(const QString &text) {
     m_picker->setItems(items);
     m_picker->setHeader(header, meta);
     m_picker->setEmptyText(emptyTitle, emptyHint);
-    m_picker->setFooter(QStringLiteral("↑↓ move · Tab complete · Enter run · Esc close"));
+    const QList<Binding> bound = m_keys.bindings();
+    const bool anyFromConfig = std::any_of(bound.begin(), bound.end(), [](const Binding &b) { return b.fromConfig; });
+    m_picker->setFooter(anyFromConfig ? QStringLiteral("↑↓ move · Tab complete · Enter run · Esc close · • from scout.conf")
+                                      : QStringLiteral("↑↓ move · Tab complete · Enter run · Esc close"));
     positionOverlays();
 }
 

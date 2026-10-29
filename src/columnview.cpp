@@ -183,10 +183,9 @@ void EntryDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
     painter->setRenderHint(QPainter::Antialiasing);
     const QRectF row = QRectF(option.rect).adjusted(3, 0.5, -3, -0.5);
     if (dropTarget) {
-        QColor fill = pal.accent;
-        fill.setAlphaF(0.22);
+        // The cursor row's fill, which every text color is checked against; the dashes set it apart.
         painter->setPen(QPen(pal.accent, 1.5, Qt::DashLine));
-        painter->setBrush(fill);
+        painter->setBrush(pal.surface);
         painter->drawRoundedRect(row.adjusted(0.75, 0.75, -0.75, -0.75), 4, 4);
     } else if (isCurrent) {
         painter->setBrush(pal.surface);
