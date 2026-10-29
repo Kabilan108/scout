@@ -49,6 +49,7 @@ ChooserBar::ChooserBar(const ChooserRequest &request, QWidget *parent) : QWidget
     layout->addWidget(m_hint);
 
     if (request.mode == ChooserRequest::Mode::Save) {
+        layout->addSpacing(16);
         auto *label = new QLabel(QStringLiteral("Name"), this);
         layout->addWidget(label);
         m_name = new QLineEdit(this);
