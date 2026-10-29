@@ -39,10 +39,15 @@ QString checkCommand(const QStringList &words, const CommandRegistry &commands) 
     if (def->name == QLatin1String("map")) {
         if (words.size() < 3)
             return QStringLiteral("usage: map <keys> <command>");
-        for (const QString &token : KeyMap::parseSequence(words[1]))
+        const QStringList keys = KeyMap::parseSequence(words[1]);
+        if (keys.isEmpty())
+            return QStringLiteral("map needs keys before the command");
+        for (const QString &token : keys)
             if (!KeyMap::isValidToken(token))
                 return QStringLiteral("map %1: unknown key %2").arg(words[1], token);
         const QStringList inner = CommandRegistry::split(config::mapCommand(words.mid(1)));
+        if (inner.isEmpty())
+            return QStringLiteral("map %1: no command").arg(words[1]);
         if (const QString problem = checkCommand(inner, commands); !problem.isEmpty())
             return QStringLiteral("map %1: %2").arg(words[1], problem);
     }

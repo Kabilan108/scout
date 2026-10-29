@@ -1554,7 +1554,9 @@ private slots:
                                                               // One error per pair, at the later line.
                                                               "map ab top\n"
                                                               "map a down\n"
-                                                              "mkdir\n"),
+                                                              "mkdir\n"
+                                                              "map '' top\n"
+                                                              "map zx ''\n"),
                                                w.commands(), w.defaultKeys());
         const QStringList expected = {
             QStringLiteral("line 3: hidden takes true, false or toggle, not maybe"),
@@ -1568,6 +1570,8 @@ private slots:
             QStringLiteral("line 13: map <C-y>: theme takes auto, dark or light"),
             QStringLiteral("line 15: map a is a prefix of other bindings (ab), so it only runs after a pause"),
             QStringLiteral("line 16: mkdir needs <name>"),
+            QStringLiteral("line 17: map needs keys before the command"),
+            QStringLiteral("line 18: map zx: no command"),
         };
         QCOMPARE(r.errors, expected);
         QCOMPARE(r.notes, (QStringList{
@@ -1576,7 +1580,7 @@ private slots:
                               QStringLiteral("line 12: unmap zq does nothing; zq isn't bound"),
                               QStringLiteral("line 15: map a overrides the default a (create)"),
                           }));
-        QCOMPARE(r.lines.size(), 15);
+        QCOMPARE(r.lines.size(), 17);
         QVERIFY(r.lines[0].run);
         QVERIFY(!r.lines[1].run);
         QVERIFY(r.lines[6].run); // shadowing still binds
