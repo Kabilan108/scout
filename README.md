@@ -262,6 +262,38 @@ and the portal routing after `systemctl --user restart xdg-desktop-portal`.
 Without NixOS, make scout the default folder handler with
 `xdg-mime default scout.desktop inode/directory`.
 
+## Logs and crashes
+
+Every scout process (a window from the launcher or a terminal, the D-Bus
+service, file chooser windows) appends to
+`~/.local/state/scout/scout.log` (`$XDG_STATE_HOME`), and to stderr. At 1 MB
+it moves to `scout.log.1` and a new file starts. Each line has a timestamp
+and the process id:
+
+```
+2026-10-28 19:20:01.123 [4242] I scout 0.2.0 (8a6e817) starting: mode window, platform wayland, args []
+2026-10-28 19:24:13.502 [4242] E no such directory: ~/nope
+2026-10-28 19:31:40.017 [4242] I window closed by close-tab on the last tab (key q): /home/you/repos (1 tab)
+2026-10-28 19:31:40.020 [4242] I exit status 0
+```
+
+It records Qt's own warnings, every error and warning shown in the status
+bar, failed copies, moves and deletes with all their errors, which key or
+command closed each tab and window (or that the window manager did), and the
+exit status. A window that vanished without a `window closed` line and an
+`exit status` line didn't close normally: look for `exit() called before
+main() returned`, a Qt message just before it (`The Wayland connection
+broke` means the compositor connection died, and Qt exits without a core
+dump), or a crash.
+
+On a crash (`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`, `SIGILL`) scout writes
+the signal and a backtrace to the log, then lets the signal kill it as
+usual, so `coredumpctl` still gets the core. The Nix package keeps symbols
+and line tables, so `coredumpctl gdb scout` and the logged backtrace both
+show function names. `SIGTERM`, `SIGHUP` and `SIGINT` are logged too.
+
+`scout --version` prints the version and the git commit it was built from.
+
 ## Not done yet
 
 - Chooser windows open as ordinary windows rather than attached to the app
