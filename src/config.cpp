@@ -11,7 +11,7 @@ namespace {
 
 const QStringList &boolOptions() {
     static const QStringList names = {QStringLiteral("hidden"), QStringLiteral("dirs-first"), QStringLiteral("reverse"),
-                                      QStringLiteral("preview")};
+                                      QStringLiteral("preview"), QStringLiteral("line-numbers")};
     return names;
 }
 

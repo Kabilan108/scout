@@ -1855,7 +1855,7 @@ void MainWindow::updateCommandList(const QString &text) {
         else if (name == QLatin1String("set") && fixed.isEmpty())
             options = {QStringLiteral("hidden"), QStringLiteral("theme"), QStringLiteral("font"), QStringLiteral("font-size"),
                        QStringLiteral("sort"), QStringLiteral("reverse"), QStringLiteral("dirs-first"), QStringLiteral("preview"),
-                       QStringLiteral("editor")};
+                       QStringLiteral("line-numbers"), QStringLiteral("editor")};
         else if (name == QLatin1String("set") && fixed.value(0) == QLatin1String("theme"))
             options = {QStringLiteral("auto"), QStringLiteral("dark"), QStringLiteral("light")};
         if (!options.isEmpty()) {
@@ -2329,6 +2329,8 @@ void MainWindow::registerCommands() {
         } else if (key == QLatin1String("preview")) {
             m_showPreview = parseBool(value, m_showPreview);
             updatePreview();
+        } else if (key == QLatin1String("line-numbers")) {
+            m_preview->setLineNumbers(parseBool(value, m_preview->lineNumbersEnabled()));
         } else if (key == QLatin1String("theme")) {
             const QString v = value.toLower();
             Theme::instance().setMode(v == QLatin1String("dark")    ? ThemeMode::Dark

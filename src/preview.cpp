@@ -248,7 +248,7 @@ Preview::Preview(Marks *marks, QWidget *parent) : QStackedWidget(parent) {
     m_dirModel = new DirModel(marks, this);
     m_dirView = new ColumnView(m_dirModel, ColumnView::Role::Preview, this);
 
-    m_text = new QPlainTextEdit(this);
+    m_text = new CodeView(this);
     m_text->setReadOnly(true);
     m_text->setFocusPolicy(Qt::NoFocus);
     m_text->setFrameShape(QFrame::NoFrame);
@@ -302,6 +302,11 @@ void Preview::applyTheme() {
 }
 
 void Preview::setOptions(const ViewOptions &options) { m_dirModel->setOptions(options); }
+
+void Preview::setLineNumbers(bool on) {
+    m_lineNumbers = on;
+    m_text->setLineNumbers(m_textFile && on);
+}
 
 QString Preview::text() const { return m_kind == Kind::Text ? m_text->toPlainText() : QString(); }
 
@@ -429,6 +434,8 @@ void Preview::showText(const QString &text, const QString &path, bool highlight)
         if (!def.isValid())
             def = m_repo.definitionForMimeType(QMimeDatabase().mimeTypeForFile(path).name());
     }
+    m_textFile = highlight;
+    m_text->setLineNumbers(highlight && m_lineNumbers);
     replaceText(text, def);
     m_text->verticalScrollBar()->setValue(0);
     setCurrentWidget(m_text);
@@ -477,6 +484,8 @@ void Preview::showImageAsync(const FileEntry &entry) {
 void Preview::showArchiveAsync(const FileEntry &entry) {
     m_kind = Kind::Text;
     const quint64 generation = m_generation;
+    m_textFile = false;
+    m_text->setLineNumbers(false);
     replaceText(QStringLiteral("reading archive…"), {});
     setCurrentWidget(m_text);
     QPointer<Preview> self(this);
@@ -514,4 +523,83 @@ void Preview::showProcessImage(const FileEntry &entry, const QString &program, c
             showInfo(entry, QStringLiteral("no preview available"));
     });
     proc->start(program, args);
+}
+
+namespace {
+
+class LineGutter : public QWidget {
+public:
+    explicit LineGutter(CodeView *view) : QWidget(view), m_view(view) {}
+
+protected:
+    void paintEvent(QPaintEvent *event) override { m_view->paintGutter(event); }
+
+private:
+    CodeView *m_view;
+};
+
+} // namespace
+
+CodeView::CodeView(QWidget *parent) : QPlainTextEdit(parent), m_gutter(new LineGutter(this)) {
+    m_gutter->hide();
+    connect(this, &QPlainTextEdit::blockCountChanged, this, &CodeView::updateMargins);
+    connect(this, &QPlainTextEdit::updateRequest, this, [this](const QRect &rect, int dy) {
+        if (!m_lineNumbers)
+            return;
+        if (dy)
+            m_gutter->scroll(0, dy);
+        else
+            m_gutter->update(0, rect.y(), m_gutter->width(), rect.height());
+    });
+}
+
+void CodeView::setLineNumbers(bool on) {
+    if (on == m_lineNumbers)
+        return;
+    m_lineNumbers = on;
+    m_gutter->setVisible(on);
+    updateMargins();
+}
+
+int CodeView::gutterWidth() const {
+    if (!m_lineNumbers)
+        return 0;
+    const int digits = std::max(3, int(QString::number(std::max(1, blockCount())).size()));
+    const QFontMetrics fm(font());
+    return fm.horizontalAdvance(u'9') * digits + fm.horizontalAdvance(u' ') * 2;
+}
+
+void CodeView::updateMargins() {
+    setViewportMargins(gutterWidth(), 0, 0, 0);
+    const QRect cr = contentsRect();
+    m_gutter->setGeometry(cr.left(), cr.top(), gutterWidth(), cr.height());
+}
+
+void CodeView::resizeEvent(QResizeEvent *event) {
+    QPlainTextEdit::resizeEvent(event);
+    updateMargins();
+}
+
+void CodeView::changeEvent(QEvent *event) {
+    QPlainTextEdit::changeEvent(event);
+    if (event->type() == QEvent::FontChange)
+        updateMargins();
+}
+
+void CodeView::paintGutter(QPaintEvent *event) {
+    QPainter p(m_gutter);
+    const Palette &pal = Theme::p();
+    p.fillRect(event->rect(), pal.base);
+    p.setFont(font());
+    p.setPen(pal.muted);
+    const int right = m_gutter->width() - QFontMetrics(font()).horizontalAdvance(u' ');
+    QTextBlock block = firstVisibleBlock();
+    int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
+    while (block.isValid() && top <= event->rect().bottom()) {
+        const int height = qRound(blockBoundingRect(block).height());
+        if (block.isVisible() && top + height >= event->rect().top())
+            p.drawText(0, top, right, height, Qt::AlignRight | Qt::AlignTop, QString::number(block.blockNumber() + 1));
+        block = block.next();
+        top += height;
+    }
 }

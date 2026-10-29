@@ -36,6 +36,27 @@ private:
     bool m_pressed = false;
 };
 
+// Read-only text with an optional line-number gutter on the left.
+class CodeView : public QPlainTextEdit {
+    Q_OBJECT
+public:
+    explicit CodeView(QWidget *parent = nullptr);
+    void setLineNumbers(bool on);
+    bool lineNumbers() const { return m_lineNumbers; }
+    int gutterWidth() const;
+    void paintGutter(QPaintEvent *event);
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
+
+private:
+    void updateMargins();
+
+    QWidget *m_gutter;
+    bool m_lineNumbers = false;
+};
+
 class InfoView : public QWidget {
     Q_OBJECT
 public:
@@ -61,6 +82,10 @@ public:
     void showEntry(const FileEntry &entry);
     void clear();
     void setOptions(const ViewOptions &options);
+    // Line numbers for text files; never for hex dumps or archive listings.
+    void setLineNumbers(bool on);
+    bool lineNumbersShown() const { return m_text->lineNumbers(); }
+    bool lineNumbersEnabled() const { return m_lineNumbers; }
     void applyTheme();
 
     Kind kind() const { return m_kind; }
@@ -82,13 +107,15 @@ private:
 
     DirModel *m_dirModel;
     ColumnView *m_dirView;
-    QPlainTextEdit *m_text;
+    CodeView *m_text;
     ImageView *m_image;
     InfoView *m_info;
     KSyntaxHighlighting::Repository m_repo;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
     QPointer<QProcess> m_process;
     Kind m_kind = Kind::None;
+    bool m_lineNumbers = true;
+    bool m_textFile = false; // the text page shows a file's text, not a hex dump or listing
     QString m_path;
     QString m_dirCursorHint;
     quint64 m_generation = 0;

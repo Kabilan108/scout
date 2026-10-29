@@ -31,7 +31,7 @@ From a checkout: `nix run .` or `nix develop`, then
 
 Press `Ctrl-k` for the command palette, which lists every command with its
 keys, or a prefix key (`g`, `y`, `d`, `p`, `s`, `z`, `u`) and wait for the
-which-key popup. The palette's "Show key map" row (`:keymap`) opens a cheat
+which-key popup. The palette's "Show key map" row (the `keymap` command) opens a cheat
 sheet grouped by task, built from your current bindings.
 
 | Keys | Action |
@@ -179,8 +179,8 @@ map <C-t> terminal
 unmap q
 ```
 
-`set` takes `hidden`, `dirs-first`, `reverse` and `preview` (`true`, `false`
-or `toggle`), `sort` (`name`, `size`, `modified`, `extension`, optionally
+`set` takes `hidden`, `dirs-first`, `reverse`, `preview` and `line-numbers`
+(line numbers in text previews, on by default) (`true`, `false` or `toggle`), `sort` (`name`, `size`, `modified`, `extension`, optionally
 followed by `reverse`), `theme` (`auto`, `dark`, `light`), `font`,
 `font-size` (6 to 32) and `editor`.
 

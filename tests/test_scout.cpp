@@ -313,6 +313,31 @@ private slots:
         QVERIFY(!QFileInfo::exists(dest + QStringLiteral("/alpha")));
     }
 
+    void textPreviewsShowLineNumbers() {
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/blob.bin"), QByteArray("\x00\x01\x02\xff\xfe", 5));
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.cd(base + QStringLiteral("/notes.md"));
+        QTRY_VERIFY(w.isIdle());
+        QTRY_COMPARE(w.preview()->kind(), Preview::Kind::Text);
+        QVERIFY(w.preview()->lineNumbersShown());
+        // Hex dumps keep their own offsets and get no gutter.
+        w.cd(base + QStringLiteral("/blob.bin"));
+        QTRY_VERIFY(w.isIdle());
+        QTRY_VERIFY(w.preview()->text().contains(QStringLiteral("00000000")));
+        QVERIFY(!w.preview()->lineNumbersShown());
+        w.cd(base + QStringLiteral("/notes.md"));
+        QTRY_VERIFY(w.isIdle());
+        QTRY_VERIFY(w.preview()->lineNumbersShown());
+        QVERIFY(w.runCommandLine(QStringLiteral("set line-numbers false")));
+        QVERIFY(!w.preview()->lineNumbersShown());
+        QVERIFY(w.preview()->text().contains(QStringLiteral("Notes")));
+        QVERIFY(w.runCommandLine(QStringLiteral("set line-numbers toggle")));
+        QVERIFY(w.preview()->lineNumbersShown());
+    }
+
     void switchingHighlightedPreviewsIsSafe() {
         // Changing the syntax definition re-highlights the old text and queues work
         // that points into it; replacing the text must not leave that work dangling.
