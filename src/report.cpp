@@ -154,7 +154,7 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
     out.reserve(text.size());
     qsizetype i = 0;
     while (i < text.size()) {
-        const bool atBoundary = i == 0 || !isPathChar(text[i - 1]);
+        const bool atBoundary = i == 0 || !isPathChar(text[i - 1]) || QStringView(text).first(i).endsWith(u"file://");
         qsizetype prefix = 0;
         if (atBoundary && matchHome && QStringView(text).sliced(i).startsWith(root))
             prefix = root.size();
@@ -174,6 +174,12 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
         if (keptLength >= 0) {
             end += keptLength;
         } else {
+            // A delimiter can sit in a folder name too, as in "~/Clients (2026)/Acme", so the
+            // path runs at least to the line's last slash; only a file name's tail can show.
+            if (end < text.size() && text[end] == u'/') {
+                const qsizetype newline = text.indexOf(u'\n', end);
+                end = std::max(end, text.lastIndexOf(u'/', newline < 0 ? text.size() - 1 : newline));
+            }
             while (end < text.size() && !endsPath(text, end))
                 ++end;
         }

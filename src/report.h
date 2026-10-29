@@ -28,8 +28,9 @@ Environment current(const QString &platform);
 QString build(const Environment &env, const CommandRegistry &commands, const KeyMap &defaults);
 
 // Every path under `home` (or `~`) becomes `~/…`, except those in `keep`, which
-// only get `home` shortened to `~`. A path ends at a quote, bracket, comma,
-// ": " or the end of the line, since log lines embed paths with spaces.
+// only get `home` shortened to `~`. Log lines embed paths with spaces, so a
+// path runs through the line's last slash, then to a quote, bracket, comma,
+// ": " or the end of the line.
 QString redactHome(const QString &text, const QString &home, const QStringList &keep);
 
 } // namespace report

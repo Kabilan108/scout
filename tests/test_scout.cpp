@@ -2105,9 +2105,13 @@ private slots:
         const QStringList keep = {home + QStringLiteral("/.config/scout/scout.conf")};
         auto redact = [&](const char *text) { return report::redactHome(QString::fromUtf8(text), home, keep); };
         QCOMPARE(redact("window closed by q: /home/you/My Docs (2 tabs)"), QStringLiteral("window closed by q: ~/… (2 tabs)"));
-        QCOMPARE(redact("task failed: Copying a (/home/you/a b.txt, /home/you/c)"), QStringLiteral("task failed: Copying a (~/…, ~/…)"));
+        QCOMPARE(redact("task failed: Copying a (/home/you/a b.txt, /home/you/c)"), QStringLiteral("task failed: Copying a (~/…)"));
         QCOMPARE(redact("can't read /home/you/tax 2025.pdf: Permission denied"), QStringLiteral("can't read ~/…: Permission denied"));
-        QCOMPARE(redact("args [/home/you/x, /home/you]"), QStringLiteral("args [~/…, ~]"));
+        QCOMPARE(redact("args [/home/you, /home/you/x]"), QStringLiteral("args [~, ~/…]"));
+        QCOMPARE(redact("args [/home/you/Clients (2026)/Acme/Payroll]"), QStringLiteral("args [~/…]"));
+        QCOMPARE(redact("args [/home/you/Tony's clients/Acme/Payroll]"), QStringLiteral("args [~/…]"));
+        QCOMPARE(redact("args [file:///home/you/Documents/private%20stuff/project]"), QStringLiteral("args [file://~/…]"));
+        QCOMPARE(redact("window for /home/you/x (1 items)\nnext /home/you/y"), QStringLiteral("window for ~/… (1 items)\nnext ~/…"));
         QCOMPARE(redact("/home/you/repos/scout/build/scout(main+0x2) [0x1]"), QStringLiteral("~/…(main+0x2) [0x1]"));
         QCOMPARE(redact("line 2: map gw cd ~/work, then cd ~"), QStringLiteral("line 2: map gw cd ~/…, then cd ~"));
         QCOMPARE(redact("config: /home/you/.config/scout/scout.conf"), QStringLiteral("config: ~/.config/scout/scout.conf"));
