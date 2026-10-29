@@ -15,7 +15,7 @@ namespace {
 
 // Options that print something and exit don't belong in scout.log.
 bool isCommandLineTool(int argc, char *argv[]) {
-    for (int i = 1; i < argc; ++i)
+    for (int i = 1; i < argc && std::strcmp(argv[i], "--") != 0; ++i)
         for (const char *flag : {"--version", "-v", "--help", "-h", "--help-all", "--check-config"})
             if (std::strcmp(argv[i], flag) == 0)
                 return true;
