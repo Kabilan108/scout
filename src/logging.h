@@ -30,6 +30,10 @@ void installMessageHandler();
 // stderr, then re-raise with the default action so a core dump still happens.
 // SIGTERM, SIGHUP and SIGINT are noted without a backtrace.
 void installCrashHandler();
+// Sends libwayland's own messages, such as the protocol error that comes
+// right before Qt exits without a core dump, to the log. Call after the
+// QApplication exists; does nothing when libwayland isn't loaded.
+void captureWaylandLog();
 // Logs main()'s exit status; an exit() from anywhere else is logged as such.
 void logExit(int status);
 

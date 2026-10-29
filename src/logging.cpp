@@ -9,9 +9,12 @@
 #include <QStandardPaths>
 
 #include <atomic>
+#include <cstdarg>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <fcntl.h>
 #include <mutex>
@@ -164,6 +167,12 @@ void onSignal(int sig) {
     raise(sig);
 }
 
+void onWaylandLog(const char *format, va_list args) {
+    char buf[1024];
+    vsnprintf(buf, sizeof buf, format, args);
+    logging::warning(QStringLiteral("[wayland] %1").arg(QString::fromLocal8Bit(buf).trimmed()));
+}
+
 void onExit() {
     if (!g_exitLogged.load())
         logging::warning(QStringLiteral("exit() called before main() returned"));
@@ -246,6 +255,13 @@ void logging::installCrashHandler() {
     sigemptyset(&sa.sa_mask);
     for (int sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTERM, SIGHUP, SIGINT})
         sigaction(sig, &sa, nullptr);
+}
+
+void logging::captureWaylandLog() {
+    using Handler = void (*)(const char *, va_list);
+    auto setHandler = reinterpret_cast<void (*)(Handler)>(dlsym(RTLD_DEFAULT, "wl_log_set_handler_client"));
+    if (setHandler)
+        setHandler(onWaylandLog);
 }
 
 void logging::logExit(int status) {

@@ -77,10 +77,12 @@ int main(int argc, char *argv[]) {
     }
 
     const bool service = parser.isSet(serviceMode);
-    if (logToFile)
+    if (logToFile) {
+        logging::captureWaylandLog();
         logging::info(QStringLiteral("scout %1 starting: mode %2, platform %3, args [%4]")
                           .arg(logging::versionString(), service ? QStringLiteral("service") : QStringLiteral("window"),
                                QGuiApplication::platformName(), QCoreApplication::arguments().mid(1).join(QStringLiteral(", "))));
+    }
 
     Theme::instance().init();
     int status = 0;
