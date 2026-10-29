@@ -150,11 +150,39 @@ QString KeyMap::display(const QStringList &keys) {
     return out;
 }
 
-void KeyMap::bind(const QString &sequence, const QString &command, const QString &description) {
+void KeyMap::bind(const QString &sequence, const QString &command, const QString &description, bool fromConfig) {
     const QStringList keys = parseSequence(sequence);
     if (keys.isEmpty())
         return;
-    m_bindings.insert(join(keys), Binding{keys, command, description});
+    m_bindings.insert(join(keys), Binding{keys, command, description, fromConfig});
+}
+
+bool KeyMap::isFromConfig(const QString &sequence) const {
+    const Binding *b = binding(sequence);
+    return b && b->fromConfig;
+}
+
+bool KeyMap::isValidToken(const QString &token) {
+    if (token.size() == 1)
+        return true;
+    if (token.size() < 3 || !token.startsWith(u'<') || !token.endsWith(u'>'))
+        return false;
+    QString key = token.mid(1, token.size() - 2);
+    while (key.size() > 2 && key[1] == u'-' && QStringView(u"CAS").contains(key[0]))
+        key = key.mid(2);
+    if (key.size() == 1)
+        return true;
+    static const QSet<QString> named = {
+        QStringLiteral("CR"),   QStringLiteral("Esc"),  QStringLiteral("Space"), QStringLiteral("Tab"),
+        QStringLiteral("BS"),   QStringLiteral("Del"),  QStringLiteral("Up"),    QStringLiteral("Down"),
+        QStringLiteral("Left"), QStringLiteral("Right"), QStringLiteral("Home"), QStringLiteral("End"),
+        QStringLiteral("PageUp"), QStringLiteral("PageDown"), QStringLiteral("Insert"),
+    };
+    if (named.contains(key))
+        return true;
+    bool ok = false;
+    const int f = key.startsWith(u'F') ? key.mid(1).toInt(&ok) : 0;
+    return ok && f >= 1 && f <= 24;
 }
 
 void KeyMap::unbind(const QString &sequence) { m_bindings.remove(join(parseSequence(sequence))); }
@@ -187,12 +215,12 @@ bool KeyMap::hasAmbiguousExact() const { return !m_pending.isEmpty() && exact(m_
 KeyMap::Result KeyMap::feed(const QString &rawToken) {
     const QString token = normalizeToken(rawToken);
     if (token.isEmpty())
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
 
     if (m_pending.isEmpty() && token.size() == 1 && token[0].isDigit() && (m_count > 0 || token[0] != u'0') &&
         !exact({token}) && !hasLonger({token})) {
         m_count = std::min(m_count * 10 + token[0].digitValue(), 99999);
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
     }
 
     QStringList keys = m_pending;
@@ -200,13 +228,13 @@ KeyMap::Result KeyMap::feed(const QString &rawToken) {
     const Binding *hit = exact(keys);
     const bool longer = hasLonger(keys);
     if (hit && !longer) {
-        Result r{Result::Command, hit->command, m_count};
+        Result r{Result::Command, hit->command, m_count, keys};
         reset();
         return r;
     }
     if (longer) {
         m_pending = keys;
-        return {Result::Pending, {}, m_count};
+        return {Result::Pending, {}, m_count, {}};
     }
     reset();
     return {};
@@ -214,7 +242,7 @@ KeyMap::Result KeyMap::feed(const QString &rawToken) {
 
 KeyMap::Result KeyMap::flush() {
     if (const Binding *hit = m_pending.isEmpty() ? nullptr : exact(m_pending)) {
-        Result r{Result::Command, hit->command, m_count};
+        Result r{Result::Command, hit->command, m_count, m_pending};
         reset();
         return r;
     }

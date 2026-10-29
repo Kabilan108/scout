@@ -11,6 +11,7 @@ struct Binding {
     QStringList keys;  // normalized tokens, e.g. {"g", "g"} or {"<C-d>"}
     QString command;   // a command line, e.g. "cd ~/Downloads"
     QString description;
+    bool fromConfig = false; // bound by `map` in scout.conf rather than a default
 };
 
 struct Continuation {
@@ -26,9 +27,10 @@ public:
         enum Kind { None, Pending, Command } kind = None;
         QString command;
         int count = 0; // 0 means no count was typed
+        QStringList keys; // the sequence that ran `command`
     };
 
-    void bind(const QString &sequence, const QString &command, const QString &description = {});
+    void bind(const QString &sequence, const QString &command, const QString &description = {}, bool fromConfig = false);
     void unbind(const QString &sequence);
     void clear();
 
@@ -44,10 +46,14 @@ public:
     QStringList pendingKeys() const { return m_pending; }
     QList<Continuation> continuations() const;
     QList<Binding> bindings() const { return m_bindings.values(); }
+    const Binding *binding(const QString &sequence) const { return exact(parseSequence(sequence)); }
+    bool isFromConfig(const QString &sequence) const;
     QString keysFor(const QString &command) const;
 
     static QStringList parseSequence(const QString &sequence);
     static QString normalizeToken(const QString &token);
+    // False for names no key event produces, such as <Foo> or <F99>.
+    static bool isValidToken(const QString &normalizedToken);
     static QString tokenFor(const QKeyEvent *event);
     static QString display(const QStringList &keys);
 

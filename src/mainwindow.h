@@ -59,6 +59,9 @@ public:
     TaskManager *tasks() { return &m_tasks; }
     Marks *marks() { return &m_marks; }
     KeyMap *keymap() { return &m_keys; }
+    // The bindings before scout.conf ran.
+    const KeyMap &defaultKeys() const { return m_defaultKeys; }
+    const CommandRegistry &commands() const { return m_commands; }
     const ViewOptions &options() const { return m_options; }
     bool isIdle() const;
 
@@ -67,6 +70,9 @@ public:
     QStringList targets() const;
 
     int tabCount() const { return int(m_tabs.size()); }
+    // Reopens the tabs of the window closed last (see state.h), skipping
+    // folders that are gone. False if nothing was saved.
+    bool restoreSession();
     int currentTab() const { return m_tab; }
     int undoDepth() const { return int(m_undo.size()); }
     // Applies renames and records them for undo; returns false if anything failed.
@@ -123,8 +129,13 @@ private:
     void updatePreview();
     void updateStatus();
     void updateHeader();
+    // Errors and warnings also go to scout.log.
     void message(const QString &text, StatusBar::Level level = StatusBar::Level::Info);
     void error(const QString &text) { message(text, StatusBar::Level::Error); }
+
+    void runFromKeys(const KeyMap::Result &result);
+    // How a command was started, for the log: "quit (key <C-q>)".
+    QString trigger(const QString &command) const;
 
     void setCursor(int row);
     void moveCursor(int delta);
@@ -164,7 +175,6 @@ private:
     void promptCommand(const QString &initial = {});
     void updateCommandList(const QString &text);
     QList<PickerItem> commandItems(const QString &query) const;
-    void promptShell();
     void promptFind();
     void updateFinderList();
     void showContextMenu(int row, const QPoint &globalPos);
@@ -253,6 +263,8 @@ private:
     bool m_finderTruncated = false;
     bool m_finderActive = false;
     qint64 m_quitArmedAt = 0;
+    QString m_trigger;     // keys running the current command, if any
+    QString m_closeReason; // logged when the window closes
     QTimer m_finderTimer;
 
     // Tabs
@@ -277,9 +289,11 @@ private:
 
     TaskManager m_tasks;
     KeyMap m_keys;
+    KeyMap m_defaultKeys;
     CommandRegistry m_commands;
     QTimer m_previewTimer;
     QTimer m_whichKeyTimer;
     QTimer m_ambiguityTimer;
     bool m_loadUserConfig;
+    bool m_loadingConfig = false;
 };

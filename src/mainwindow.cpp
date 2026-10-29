@@ -1,14 +1,17 @@
 #include "mainwindow.h"
 
+#include "config.h"
 #include "desktopentry.h"
 #include "fuzzy.h"
+#include "launcher.h"
+#include "logging.h"
+#include "state.h"
 #include "theme.h"
 
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -18,7 +21,6 @@
 #include <QMenu>
 #include <QMimeDatabase>
 #include <QPointer>
-#include <QProcess>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QStandardPaths>
@@ -167,7 +169,7 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
         const KeyMap::Result r = m_keys.flush();
         hideWhichKey();
         if (r.kind == KeyMap::Result::Command)
-            runCommandLine(r.command, r.count);
+            runFromKeys(r);
         updateStatus();
     });
     m_finderTimer.setSingleShot(true);
@@ -192,6 +194,7 @@ MainWindow::MainWindow(const QString &startPath, bool loadUserConfig, QWidget *p
     buildUi();
     registerCommands();
     bindDefaults();
+    m_defaultKeys = m_keys;
     if (m_loadUserConfig)
         loadConfig();
     applyTheme();
@@ -317,7 +320,7 @@ void MainWindow::buildUi() {
                 cd(e->path);
             } else {
                 cd(parentDir(e->path), e->name);
-                QDesktopServices::openUrl(QUrl::fromLocalFile(e->path));
+                launcher::openUrl(QUrl::fromLocalFile(e->path));
             }
         }
     });
@@ -633,6 +636,10 @@ void MainWindow::updateStatus() {
 }
 
 void MainWindow::message(const QString &text, StatusBar::Level level) {
+    if (level == StatusBar::Level::Error)
+        logging::error(text);
+    else if (level == StatusBar::Level::Warning)
+        logging::warning(text);
     m_status->showMessage(text, level, level == StatusBar::Level::Error ? 7000 : 3500);
 }
 
@@ -697,7 +704,7 @@ void MainWindow::openTargets() {
             unhandled << it.value();
     }
     for (const QString &p : unhandled)
-        QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+        launcher::openUrl(QUrl::fromLocalFile(p));
     if (!names.isEmpty())
         message(QStringLiteral("opened with %1").arg(names.join(QStringLiteral(", "))));
 }
@@ -835,7 +842,7 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     case KeyMap::Result::Command:
         m_ambiguityTimer.stop();
         hideWhichKey();
-        runCommandLine(result.command, result.count);
+        runFromKeys(result);
         break;
     case KeyMap::Result::Pending:
         if (m_keys.hasAmbiguousExact())
@@ -1309,6 +1316,8 @@ void MainWindow::onTaskFinished(Task *task) {
         message(summary, StatusBar::Level::Success);
         break;
     case Task::Failed:
+        logging::error(QStringLiteral("task failed: %1 (%2)\n%3")
+                           .arg(task->title(), task->sources().join(QStringLiteral(", ")), p.errors.join(u'\n')));
         error(QStringLiteral("%1 failed: %2%3")
                   .arg(task->verb().toLower(), p.errors.value(0))
                   .arg(p.errors.size() > 1 ? QStringLiteral(" (+%1 more, see tasks: w)").arg(p.errors.size() - 1) : QString()));
@@ -1580,17 +1589,6 @@ void MainWindow::searchNext(int direction) {
         }
     }
     error(QStringLiteral("no match for %1").arg(m_search));
-}
-
-void MainWindow::promptShell() {
-    PromptSpec spec;
-    spec.label = QStringLiteral("!");
-    spec.onAccept = [this](const QString &text, const PickerItem *) {
-        if (text.trimmed().isEmpty())
-            return;
-        runCommandLine(QStringLiteral("shell ") + CommandRegistry::quote(text));
-    };
-    openPrompt(spec);
 }
 
 void MainWindow::promptFind() {
@@ -1956,6 +1954,17 @@ void MainWindow::showContextMenu(int row, const QPoint &globalPos) {
     menu.exec(globalPos);
 }
 
+void MainWindow::runFromKeys(const KeyMap::Result &result) {
+    m_trigger = KeyMap::display(result.keys);
+    runCommandLine(result.command, result.count);
+    m_trigger.clear();
+}
+
+QString MainWindow::trigger(const QString &command) const {
+    return m_trigger.isEmpty() ? QStringLiteral("%1 (command)").arg(command)
+                               : QStringLiteral("%1 (key %2)").arg(command, m_trigger);
+}
+
 bool MainWindow::runCommandLine(const QString &line, int count) {
     const QStringList parts = CommandRegistry::split(line);
     if (parts.isEmpty())
@@ -1972,7 +1981,7 @@ bool MainWindow::runCommandLine(const QString &line, int count) {
         QStringLiteral("half-page-up"),   QStringLiteral("page-down"),    QStringLiteral("page-up"),
         QStringLiteral("search"),         QStringLiteral("search-back"),  QStringLiteral("search-next"),
         QStringLiteral("search-prev"),    QStringLiteral("preview-down"), QStringLiteral("preview-up"),
-        QStringLiteral("zoom-in"),        QStringLiteral("zoom-out"),
+        QStringLiteral("zoom-in"),        QStringLiteral("zoom-out"),     QStringLiteral("zoom-reset"),
     };
     if (!keepsVisual.contains(def->name))
         endVisual();
@@ -2190,6 +2199,7 @@ void MainWindow::registerCommands() {
     });
     cmd(QStringLiteral("zoom-in"), QStringLiteral("Bigger text"), [](const CommandContext &) { Theme::instance().zoom(1); });
     cmd(QStringLiteral("zoom-out"), QStringLiteral("Smaller text"), [](const CommandContext &) { Theme::instance().zoom(-1); });
+    cmd(QStringLiteral("zoom-reset"), QStringLiteral("Text back to the configured size"), [](const CommandContext &) { Theme::instance().resetZoom(); });
     cmd(QStringLiteral("reload"), QStringLiteral("Reload the listing"), [this](const CommandContext &) {
         m_currentModel->reload();
         m_parentModel->reload();
@@ -2198,25 +2208,13 @@ void MainWindow::registerCommands() {
 
     // Prompts and panels
     cmd(QStringLiteral("command"), QStringLiteral("Open the command palette"), [this](const CommandContext &) { promptCommand(); });
-    cmd(QStringLiteral("shell"), QStringLiteral("Run a shell command here; targets are $@"), [this](const CommandContext &c) {
-        if (c.args.isEmpty()) {
-            promptShell();
-            return;
-        }
-        QStringList args{QStringLiteral("-c"), c.args.join(u' '), QStringLiteral("scout")};
-        args << targets();
-        if (QProcess::startDetached(QStringLiteral("sh"), args, m_cwd))
-            message(QStringLiteral("started: %1").arg(c.args.join(u' ')));
-        else
-            error(QStringLiteral("could not start sh"));
-    }, QStringLiteral("<command>"));
     cmd(QStringLiteral("terminal"), QStringLiteral("Open a terminal in this folder"), [this](const CommandContext &) {
         const QString term = terminalProgram();
         if (term.isEmpty()) {
             error(QStringLiteral("no terminal found; set $TERMINAL"));
             return;
         }
-        QProcess::startDetached(term, terminalArgsForDirectory(term, m_cwd), m_cwd);
+        launcher::startDetached(term, terminalArgsForDirectory(term, m_cwd), m_cwd);
     });
     cmd(QStringLiteral("tasks"), QStringLiteral("Show copy, move and delete progress"), [this](const CommandContext &) { showTasks(); });
     cmd(QStringLiteral("properties"), QStringLiteral("Show or hide details and total size under the preview"),
@@ -2225,16 +2223,19 @@ void MainWindow::registerCommands() {
     cmd(QStringLiteral("keymap"), QStringLiteral("Show key map"), [this](const CommandContext &) { showKeyMap(); });
     cmd(QStringLiteral("new-window"), QStringLiteral("Open another window here"), [this](const CommandContext &) {
         const QStringList args = QCoreApplication::arguments();
-        QProcess::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd});
+        launcher::startDetached(args.isEmpty() ? QCoreApplication::applicationFilePath() : args.first(), {m_cwd}, {});
     });
     cmd(QStringLiteral("new-tab"), QStringLiteral("Open a tab here (or at a path)"), [this](const CommandContext &c) {
         newTab(c.args.isEmpty() ? m_cwd : c.args.join(u' '));
     }, QStringLiteral("[path]"));
     cmd(QStringLiteral("close-tab"), QStringLiteral("Close this tab (the window, if it is the last)"), [this](const CommandContext &) {
-        if (m_tabs.size() > 1)
+        if (m_tabs.size() > 1) {
+            logging::info(QStringLiteral("tab %1 of %2 closed by %3: %4").arg(m_tab + 1).arg(m_tabs.size()).arg(trigger(QStringLiteral("close-tab")), m_cwd));
             closeTab();
-        else
+        } else {
+            m_closeReason = trigger(QStringLiteral("close-tab on the last tab"));
             runCommandLine(QStringLiteral("quit"));
+        }
     });
     cmd(QStringLiteral("next-tab"), QStringLiteral("Go to the next tab"), [this](const CommandContext &c) {
         if (m_tabs.size() < 2)
@@ -2272,10 +2273,13 @@ void MainWindow::registerCommands() {
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         if (active > 0 && now - m_quitArmedAt > 3000) {
             m_quitArmedAt = now;
+            m_closeReason.clear();
             message(QStringLiteral("%1 still running; quit again to cancel them").arg(plural(active, "task")),
                     StatusBar::Level::Warning);
             return;
         }
+        if (m_closeReason.isEmpty())
+            m_closeReason = trigger(QStringLiteral("quit"));
         close();
     });
 
@@ -2293,6 +2297,10 @@ void MainWindow::registerCommands() {
     cmd(QStringLiteral("set"), QStringLiteral("Change an option"), [this](const CommandContext &c) {
         const QString key = c.args.value(0);
         const QString value = c.args.mid(1).join(u' ');
+        if (const QString problem = config::checkOption(key, value); !problem.isEmpty()) {
+            error(problem);
+            return;
+        }
         if (key == QLatin1String("hidden")) {
             m_options.showHidden = parseBool(value, m_options.showHidden);
             applyOptions();
@@ -2319,8 +2327,9 @@ void MainWindow::registerCommands() {
         } else if (key == QLatin1String("font-size")) {
             bool ok = false;
             const double size = value.toDouble(&ok);
+            // From scout.conf it is only the default; typed, it replaces any remembered zoom.
             if (ok)
-                Theme::instance().setFontSize(size);
+                Theme::instance().setFontSize(size, !m_loadingConfig);
             else
                 error(QStringLiteral("font-size needs a number"));
         } else {
@@ -2332,17 +2341,8 @@ void MainWindow::registerCommands() {
             error(QStringLiteral("usage: map <keys> <command>"));
             return;
         }
-        // `map gw 'cd ~/work'` and `map gw cd ~/work` mean the same thing.
-        QString command;
-        if (c.args.size() == 2) {
-            command = c.args[1];
-        } else {
-            QStringList rest;
-            for (const QString &a : c.args.mid(1))
-                rest << CommandRegistry::quote(a);
-            command = rest.join(u' ');
-        }
-        m_keys.bind(c.args.first(), command, command);
+        const QString command = config::mapCommand(c.args);
+        m_keys.bind(c.args.first(), command, command, m_loadingConfig);
     }, QStringLiteral("<keys> <command>"), true);
     cmd(QStringLiteral("unmap"), QStringLiteral("Remove a key binding"),
         [this](const CommandContext &c) { m_keys.unbind(c.args.value(0)); }, QStringLiteral("<keys>"), true);
@@ -2384,18 +2384,16 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("~"), QStringLiteral("cd ~"), QStringLiteral("Home"));
 
     bind(QStringLiteral("gh"), QStringLiteral("cd ~"), QStringLiteral("Home"));
-    bind(QStringLiteral("gd"), QStringLiteral("cd ~/Downloads"), QStringLiteral("Downloads"));
-    bind(QStringLiteral("gD"), QStringLiteral("cd ~/Documents"), QStringLiteral("Documents"));
-    bind(QStringLiteral("gp"), QStringLiteral("cd ~/Pictures"), QStringLiteral("Pictures"));
-    bind(QStringLiteral("gv"), QStringLiteral("cd ~/Videos"), QStringLiteral("Videos"));
-    bind(QStringLiteral("gM"), QStringLiteral("cd ~/Music"), QStringLiteral("Music"));
+    // Follows ~/.config/user-dirs.dirs.
+    bind(QStringLiteral("gd"),
+         QStringLiteral("cd ") + CommandRegistry::quote(QStandardPaths::writableLocation(QStandardPaths::DownloadLocation)),
+         QStringLiteral("Downloads"));
     bind(QStringLiteral("gc"), QStringLiteral("cd ~/.config"), QStringLiteral("~/.config"));
     bind(QStringLiteral("gr"), QStringLiteral("cd ~/repos"), QStringLiteral("~/repos"));
     bind(QStringLiteral("g/"), QStringLiteral("cd /"), QStringLiteral("Root /"));
     bind(QStringLiteral("gb"), QStringLiteral("cd ~/.local/share/Trash/files"), QStringLiteral("Trash (bin)"));
-    bind(QStringLiteral("gm"), QStringLiteral("cd /run/media"), QStringLiteral("Mounted drives"));
     bind(QStringLiteral("gt"), QStringLiteral("next-tab"));
-    bind(QStringLiteral("gT"), QStringLiteral("prev-tab"));
+    bind(QStringLiteral("gp"), QStringLiteral("prev-tab"));
     bind(QStringLiteral("gn"), QStringLiteral("new-tab"));
     bind(QStringLiteral("gx"), QStringLiteral("open"));
     bind(QStringLiteral("<C-f>"), QStringLiteral("find"));
@@ -2449,7 +2447,6 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("sr"), QStringLiteral("sort reverse"), QStringLiteral("Reverse the sort"));
 
     bind(QStringLiteral("<C-k>"), QStringLiteral("command"));
-    bind(QStringLiteral("!"), QStringLiteral("shell"));
     bind(QStringLiteral("T"), QStringLiteral("terminal"));
     bind(QStringLiteral("w"), QStringLiteral("tasks"));
     bind(QStringLiteral("<A-CR>"), QStringLiteral("properties"));
@@ -2458,6 +2455,7 @@ void MainWindow::bindDefaults() {
     bind(QStringLiteral("<C-=>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-+>"), QStringLiteral("zoom-in"));
     bind(QStringLiteral("<C-->"), QStringLiteral("zoom-out"));
+    bind(QStringLiteral("<C-0>"), QStringLiteral("zoom-reset"));
     bind(QStringLiteral("q"), QStringLiteral("close-tab"));
     bind(QStringLiteral("<C-q>"), QStringLiteral("quit"));
     bind(QStringLiteral("<C-w>"), QStringLiteral("close-tab"));
@@ -2469,31 +2467,49 @@ void MainWindow::bindDefaults() {
 }
 
 void MainWindow::loadConfig() {
-    const QString path = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) +
-                         QStringLiteral("/scout/scout.conf");
-    QFile f(path);
+    QFile f(config::defaultPath());
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
         return;
-    QTextStream in(&f);
-    int lineNo = 0;
-    QStringList problems;
-    while (!in.atEnd()) {
-        ++lineNo;
-        const QString line = in.readLine().trimmed();
-        if (line.isEmpty() || line.startsWith(u'#'))
-            continue;
-        const QString name = CommandRegistry::split(line).value(0);
-        if (!m_commands.find(name)) {
-            problems << QStringLiteral("line %1: unknown command %2").arg(lineNo).arg(name);
-            continue;
-        }
-        runCommandLine(line);
-    }
-    if (!problems.isEmpty())
-        error(QStringLiteral("scout.conf: ") + problems.join(QStringLiteral("; ")));
+    const ConfigReport report = config::analyze(QString::fromUtf8(f.readAll()), m_commands, m_defaultKeys);
+    m_loadingConfig = true;
+    for (const ConfigLine &line : report.lines)
+        if (line.run)
+            runCommandLine(line.text);
+    m_loadingConfig = false;
+    if (!report.errors.isEmpty())
+        error(QStringLiteral("scout.conf: ") + report.errors.join(QStringLiteral("; ")));
 }
 
 // Tabs
+
+bool MainWindow::restoreSession() {
+    const std::optional<state::Session> saved = state::session();
+    if (!saved || saved->tabs.isEmpty())
+        return false;
+    QList<Tab> tabs;
+    int active = 0;
+    for (int i = 0; i < saved->tabs.size(); ++i) {
+        if (!QFileInfo(saved->tabs[i]).isDir())
+            continue;
+        // A vanished active tab hands over to the one before it.
+        if (i <= saved->active)
+            active = int(tabs.size());
+        Tab t;
+        t.cwd = saved->tabs[i];
+        tabs << t;
+    }
+    if (tabs.isEmpty()) {
+        Tab home;
+        home.cwd = QDir::homePath();
+        tabs << home;
+    }
+    logging::info(QStringLiteral("restored %1 of %2 saved tabs").arg(tabs.size()).arg(saved->tabs.size()));
+    m_tabs = tabs;
+    m_back.clear();
+    m_forward.clear();
+    loadTab(active);
+    return true;
+}
 
 void MainWindow::saveTab() {
     Tab &t = m_tabs[m_tab];
@@ -2761,7 +2777,7 @@ void MainWindow::startBulkRename(const QStringList &paths) {
         }
         argv = QStringList{term} + terminalExecArgs(term) + argv;
     }
-    if (!QProcess::startDetached(argv.first(), argv.mid(1), m_cwd)) {
+    if (!launcher::startDetached(argv.first(), argv.mid(1), m_cwd)) {
         error(QStringLiteral("could not start %1").arg(argv.first()));
         return;
     }
@@ -3031,6 +3047,7 @@ void MainWindow::chooserAcceptPaths(const QStringList &paths) {
     result.choices = m_chooserBar->choices();
     auto done = std::exchange(m_chooserDone, {});
     done(result);
+    m_closeReason = QStringLiteral("file chooser accepted");
     QTimer::singleShot(0, this, &QWidget::close);
 }
 
@@ -3045,11 +3062,24 @@ void MainWindow::finishChooser(bool accepted) {
     result.filter = m_chooserBar ? m_chooserBar->filterIndex() : -1;
     auto done = std::exchange(m_chooserDone, {});
     done(result);
+    m_closeReason = QStringLiteral("file chooser cancelled");
     if (isVisible())
         QTimer::singleShot(0, this, &QWidget::close);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
+    logging::info(QStringLiteral("window closed by %1: %2 (%3)")
+                      .arg(m_closeReason.isEmpty() ? QStringLiteral("the window manager") : m_closeReason, m_cwd,
+                           plural(int(m_tabs.size()), "tab")));
+    m_closeReason.clear();
+    if (!isChooser()) {
+        saveTab();
+        state::Session session;
+        for (const Tab &t : std::as_const(m_tabs))
+            session.tabs << t.cwd;
+        session.active = m_tab;
+        state::setSession(session);
+    }
     if (m_chooserDone) {
         ChooserResult result;
         auto done = std::exchange(m_chooserDone, {});

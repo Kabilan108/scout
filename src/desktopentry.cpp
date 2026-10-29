@@ -1,11 +1,12 @@
 #include "desktopentry.h"
 
+#include "launcher.h"
+
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QMimeDatabase>
-#include <QProcess>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QUrl>
@@ -351,7 +352,7 @@ bool DesktopApps::launch(const DesktopApp &app, const QStringList &paths, const 
         if (argv.isEmpty())
             continue;
         QStringList args = argv.mid(1);
-        if (!QProcess::startDetached(argv.first(), args, workingDir)) {
+        if (!launcher::startDetached(argv.first(), args, workingDir)) {
             if (error)
                 *error = QStringLiteral("could not start %1").arg(argv.first());
             return false;

@@ -40,10 +40,10 @@ sheet grouped by task, built from your current bindings.
 | `Enter` | open with the default app |
 | `gg` `G` `5j` `Ctrl-d` `Ctrl-u` | top, bottom, counts, half pages (`PageDown` `PageUp` for whole pages) |
 | `H` `L` | back and forward in history |
-| `gh` `gd` `gD` `gp` `gv` `gM` | home, Downloads, Documents, Pictures, Videos, Music |
-| `gc` `gr` `g/` `gb` `gm` | ~/.config, ~/repos, /, the trash (bin), mounted drives |
+| `gh` `gd` | home, your downloads folder (`XDG_DOWNLOAD_DIR` from `~/.config/user-dirs.dirs`) |
+| `gc` `gr` `g/` `gb` | ~/.config, ~/repos, /, the trash (bin) |
 | `gn` / `Ctrl-t` | new tab here |
-| `gt` `gT` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
+| `gt` `gp` / `Ctrl-Tab` `Ctrl-Shift-Tab` / `Alt-1`…`Alt-9` | next, previous, or Nth tab |
 | `q` / `Ctrl-w` | close the tab (the window, if it's the last); `Ctrl-q` closes the window |
 | `uq` | reopen the last closed tab |
 | `Ctrl-k` | command palette: search commands and keys, or type a command line |
@@ -66,12 +66,11 @@ sheet grouped by task, built from your current bindings.
 | `zh` / `Ctrl-h` | toggle hidden files |
 | `sn` `ss` `sm` `se` `sr` | sort by name, size, modified, extension; reverse |
 | `J` `K` | scroll the preview |
-| `!` | run a shell command here; marked files are `"$@"` |
 | `T` | terminal in this folder |
 | `w` | tasks: progress of copies and moves (`x` cancels) |
 | `Alt-Enter` | properties under the preview, following the cursor (again, or `Esc`, closes) |
 | `Ctrl-n` | new window here |
-| `Ctrl-=` `Ctrl--` | zoom |
+| `Ctrl-=` `Ctrl--` `Ctrl-0` | zoom in, out (remembered across restarts), and back to the configured size |
 
 Marks persist across folders and tabs, so you can collect files from several
 places and then copy, trash, or drag them together. Visual mode ends when you
@@ -104,6 +103,18 @@ runs. With
 several items marked it shows their count and total size. It follows the
 cursor until you press `Alt-Enter` again, or `Esc` when there is nothing
 else to clear.
+
+## Remembered between runs
+
+`~/.local/state/scout/state.json` (`$XDG_STATE_HOME`) holds what scout
+remembers, apart from the config so a Nix-managed `scout.conf` never fights it:
+
+- The zoomed text size. It wins over `set font-size` in the config;
+  `Ctrl-0` goes back to the configured size and forgets it.
+- The tabs (their folders and which was active) of the window you closed
+  last. `scout` with no path reopens them, skipping folders that are gone.
+  `scout <path>`, "Show in folder", file chooser dialogs and `Ctrl-n` open
+  just their folder.
 
 ## Undo, trash, and bulk rename
 
@@ -168,6 +179,70 @@ map <C-t> terminal
 unmap q
 ```
 
+`set` takes `hidden`, `dirs-first`, `reverse` and `preview` (`true`, `false`
+or `toggle`), `sort` (`name`, `size`, `modified`, `extension`, optionally
+followed by `reverse`), `theme` (`auto`, `dark`, `light`), `font`,
+`font-size` (6 to 32) and `editor`.
+
+Problems show up in the status bar at startup and in the log. To check a
+config without starting scout:
+
+```console
+$ scout --check-config            # or: scout --check-config path/to/scout.conf
+scout.conf: /home/you/.config/scout/scout.conf
+info:
+  line 7: map gd overrides the default gd (cd /home/you/downloads)
+  line 9: unmap q removes the default q (close-tab)
+errors:
+  line 3: unknown command frobnicate
+  line 8: map g is a prefix of other bindings (g/, gb, gc, gd, gf, gg and 6 more), so it only runs after a pause
+2 errors
+```
+
+Errors are unknown commands (inside `map` too), unknown keys, unknown `set`
+options or bad values, and bindings that are a prefix of another binding or
+extend one (scout then has to wait to see whether more keys follow). The
+default bindings never do that, so only conflicts the config introduces are
+reported. The exit status is 1 when there are errors.
+
+### Home Manager
+
+The flake has a home-manager module (`homeManagerModules.default`, also
+`homeModules.default`) that installs scout and writes `scout.conf`:
+
+```nix
+{
+  imports = [ inputs.scout.homeManagerModules.default ];
+  programs.scout = {
+    enable = true;
+    settings = {
+      hidden = true;
+      sort = "modified";
+      font = "JetBrains Mono";
+      font-size = 11;
+      editor = "nvim";
+    };
+    bookmarks = {          # g<key> goes to the folder
+      w = "~/work";
+      n = "~/notes";
+    };
+    keybindings = {
+      "<C-t>" = "terminal";
+      q = null;            # null removes a default binding
+    };
+    extraConfig = ''
+      map gx open
+    '';
+  };
+}
+```
+
+The package defaults to `pkgs.scout` when scout's overlay provides it, and to
+the flake's own package otherwise. The generated file is run through
+`scout --check-config` while it builds, so a config with errors fails the
+build with the report in the log. With nothing configured, the module leaves
+an existing `scout.conf` alone.
+
 ## Desktop integration
 
 `scout --service` is a D-Bus service that owns two names. D-Bus starts it on
@@ -216,8 +291,40 @@ and the portal routing after `systemctl --user restart xdg-desktop-portal`.
 Without NixOS, make scout the default folder handler with
 `xdg-mime default scout.desktop inode/directory`.
 
+## Logs and crashes
+
+Every scout process (a window from the launcher or a terminal, the D-Bus
+service, file chooser windows) appends to
+`~/.local/state/scout/scout.log` (`$XDG_STATE_HOME`), and to stderr. At 1 MB
+it moves to `scout.log.1` and a new file starts. Each line has a timestamp
+and the process id:
+
+```
+2026-10-28 19:20:01.123 [4242] I scout 0.2.0 (8a6e817) starting: mode window, platform wayland, args []
+2026-10-28 19:24:13.502 [4242] E no such directory: ~/nope
+2026-10-28 19:31:40.017 [4242] I window closed by close-tab on the last tab (key q): /home/you/repos (1 tab)
+2026-10-28 19:31:40.020 [4242] I exit status 0
+```
+
+It records Qt's own warnings, every error and warning shown in the status
+bar, failed copies, moves and deletes with all their errors, which key or
+command closed each tab and window (or that the window manager did), and the
+exit status. A window that vanished without a `window closed` line and an
+`exit status` line didn't close normally: look for `exit() called before
+main() returned`, a Qt message just before it (`The Wayland connection
+broke` means the compositor connection died, and Qt exits without a core
+dump), or a crash.
+
+On a crash (`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`, `SIGILL`) scout writes
+the signal and a backtrace to the log, then lets the signal kill it as
+usual, so `coredumpctl` still gets the core. The Nix package keeps symbols
+and line tables, so `coredumpctl gdb scout` and the logged backtrace both
+show function names. `SIGTERM`, `SIGHUP` and `SIGINT` are logged too.
+
+`scout --version` prints the version and the git commit it was built from.
+
 ## Not done yet
 
 - Chooser windows open as ordinary windows rather than attached to the app
   that asked (xdg-foreign); niri places them like any new window.
-- Mounting and ejecting drives; `gm` only browses what is already mounted.
+- Mounting and ejecting drives.

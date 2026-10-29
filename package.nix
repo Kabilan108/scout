@@ -10,6 +10,8 @@
   poppler-utils,
   ffmpegthumbnailer,
   xdg-utils,
+  # Shown by `scout --version` and in scout.log; the flake passes its revision.
+  commit ? "unknown",
 }:
 
 let
@@ -55,13 +57,26 @@ stdenv.mkDerivation {
 
   dontWrapQtApps = true;
 
-  cmakeFlags = [ (lib.cmakeFeature "SCOUT_PLUGIN_DIRS" (lib.concatStringsSep ";" pluginDirs)) ];
+  # Symbols and line tables stay in the binary, so crash backtraces in
+  # scout.log and coredumpctl have function names. -g1 keeps it small.
+  cmakeBuildType = "RelWithDebInfo";
+  dontStrip = true;
+
+  cmakeFlags = [
+    (lib.cmakeFeature "SCOUT_PLUGIN_DIRS" (lib.concatStringsSep ";" pluginDirs))
+    (lib.cmakeFeature "SCOUT_COMMIT" commit)
+  ];
+  # cmakeFlags would split the value at its spaces.
+  preConfigure = ''
+    cmakeFlagsArray+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g1 -DNDEBUG")
+  '';
 
   doCheck = true;
   preCheck = ''
     export QT_QPA_PLATFORM=offscreen
     export HOME=$(mktemp -d)
     export XDG_DATA_HOME=$HOME/.local/share
+    export XDG_STATE_HOME=$HOME/.local/state
   '';
 
   postFixup = ''
@@ -73,6 +88,9 @@ stdenv.mkDerivation {
       ]
     }
   '';
+
+  # Tells the home-manager module this is the file manager, not nixpkgs' URL fuzzer of the same name.
+  passthru.scoutFileManager = true;
 
   meta = {
     description = "Keyboard-first, ranger-style file manager for Wayland";

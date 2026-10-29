@@ -1,5 +1,7 @@
 #include "theme.h"
 
+#include "state.h"
+
 #include <QApplication>
 #include <QDBusConnection>
 #include <QDBusPendingCallWatcher>
@@ -184,6 +186,8 @@ void Theme::init() {
     m_font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     if (m_font.pointSizeF() < 9)
         m_font.setPointSizeF(10.5);
+    m_defaultSize = m_font.pointSizeF();
+    restoreZoom();
 
     auto bus = QDBusConnection::sessionBus();
     if (bus.isConnected()) {
@@ -266,13 +270,41 @@ void Theme::setFontFamily(const QString &family) {
     emit changed();
 }
 
-void Theme::setFontSize(double points) {
-    m_font.setPointSizeF(std::clamp(points, 6.0, 32.0));
+void Theme::setFontSize(double points, bool forgetZoom) {
+    m_defaultSize = std::clamp(points, 6.0, 32.0);
+    // Another window may have saved a zoom this one never saw.
+    if (forgetZoom) {
+        m_zoomed.reset();
+        state::setFontSize(std::nullopt);
+    }
+    applyFontSize(m_zoomed.value_or(m_defaultSize));
+}
+
+void Theme::zoom(double deltaPoints) {
+    m_zoomed = std::clamp(m_font.pointSizeF() + deltaPoints, 6.0, 32.0);
+    state::setFontSize(m_zoomed);
+    applyFontSize(*m_zoomed);
+}
+
+void Theme::resetZoom() {
+    m_zoomed.reset();
+    state::setFontSize(std::nullopt);
+    applyFontSize(m_defaultSize);
+}
+
+void Theme::restoreZoom() {
+    const std::optional<double> remembered = state::fontSize();
+    m_zoomed = remembered ? std::optional<double>(std::clamp(*remembered, 6.0, 32.0)) : std::nullopt;
+    m_font.setPointSizeF(m_zoomed.value_or(m_defaultSize));
     applyToApplication();
     emit changed();
 }
 
-void Theme::zoom(double deltaPoints) { setFontSize(m_font.pointSizeF() + deltaPoints); }
+void Theme::applyFontSize(double points) {
+    m_font.setPointSizeF(points);
+    applyToApplication();
+    emit changed();
+}
 
 int Theme::rowHeight() const { return QFontMetrics(m_font).height() + 6; }
 

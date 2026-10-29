@@ -1,12 +1,17 @@
 #include "clipboard.h"
 #include "commands.h"
+#include "config.h"
 #include "desktopentry.h"
 #include "dirmodel.h"
 #include "fileops.h"
 #include "fuzzy.h"
 #include "keymap.h"
+#include "launcher.h"
+#include "logging.h"
 #include "mainwindow.h"
 #include "service.h"
+#include "startup.h"
+#include "state.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -18,6 +23,8 @@
 #include <QJsonObject>
 #include <QMenu>
 #include <QMimeData>
+#include <QProcess>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -25,8 +32,16 @@
 #include <QUrl>
 
 #include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <csignal>
+#include <linux/landlock.h>
+#include <random>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace {
@@ -36,6 +51,60 @@ void writeFile(const QString &path, const QByteArray &content = "hello\n") {
     QFile f(path);
     QVERIFY(f.open(QIODevice::WriteOnly));
     f.write(content);
+}
+
+// From here on this process may only create, change or remove files below
+// `root` (and write to /dev/null), and may not exec anything. False when the
+// kernel has no Landlock.
+QString readAll(const QString &path) {
+    QFile f(path);
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+}
+
+// `scout_tests --crash-child <log>`: crashes with the handler installed.
+[[noreturn]] void crashChild(const char *logPath) {
+    const rlimit noCore{0, 0};
+    setrlimit(RLIMIT_CORE, &noCore);
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    logging::open(QString::fromLocal8Bit(logPath));
+    logging::installCrashHandler();
+    logging::info(QStringLiteral("about to crash"));
+    raise(SIGSEGV);
+    _exit(3);
+}
+
+bool confineWritesTo(const QString &root) {
+    const long abi = syscall(SYS_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 1)
+        return false;
+    __u64 write = LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                  LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+                  LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+                  LANDLOCK_ACCESS_FS_MAKE_SYM;
+    if (abi >= 2)
+        write |= LANDLOCK_ACCESS_FS_REFER;
+    if (abi >= 3)
+        write |= LANDLOCK_ACCESS_FS_TRUNCATE;
+    landlock_ruleset_attr attr{};
+    attr.handled_access_fs = write | LANDLOCK_ACCESS_FS_EXECUTE;
+    const int ruleset = int(syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, 0));
+    if (ruleset < 0)
+        return false;
+    auto allow = [ruleset](const char *path, __u64 access) {
+        landlock_path_beneath_attr rule{};
+        rule.allowed_access = access;
+        rule.parent_fd = open(path, O_PATH | O_CLOEXEC);
+        const bool ok = rule.parent_fd >= 0 &&
+                        syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &rule, 0) == 0;
+        if (rule.parent_fd >= 0)
+            close(rule.parent_fd);
+        return ok;
+    };
+    const bool ok = allow(QFile::encodeName(root).constData(), write) &&
+                    allow("/dev/null", LANDLOCK_ACCESS_FS_WRITE_FILE | (abi >= 3 ? LANDLOCK_ACCESS_FS_TRUNCATE : 0)) &&
+                    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && syscall(SYS_landlock_restrict_self, ruleset, 0) == 0;
+    close(ruleset);
+    return ok;
 }
 
 } // namespace
@@ -77,14 +146,28 @@ private:
     }
 
     int m_trees = 0;
+    QList<QStringList> m_launches;
 
 private slots:
     void initTestCase() {
         QVERIFY(m_root.isValid());
         qputenv("XDG_DATA_HOME", (m_root.path() + QStringLiteral("/xdg-data")).toLocal8Bit());
         qputenv("XDG_CONFIG_HOME", (m_root.path() + QStringLiteral("/xdg-config")).toLocal8Bit());
+        qputenv("XDG_STATE_HOME", (m_root.path() + QStringLiteral("/xdg-state")).toLocal8Bit());
         QDir().mkpath(m_root.path() + QStringLiteral("/xdg-data"));
         Theme::instance().init();
+        // No test starts a real program: only stand-ins the tests write under m_root run.
+        launcher::setHook([this](const QString &program, const QStringList &args, const QString &dir) {
+            m_launches << (QStringList{program} + args);
+            if (program.startsWith(m_root.path() + u'/'))
+                return QProcess::startDetached(program, args, dir);
+            return true;
+        });
+    }
+
+    void cleanupTestCase() {
+        for (const QStringList &argv : std::as_const(m_launches))
+            qInfo("launch: %s", qPrintable(argv.join(u' ')));
     }
 
     void fuzzyRanksBasenameAndBoundaries() {
@@ -1036,6 +1119,147 @@ private slots:
         QVERIFY(!marked("beta"));
     }
 
+    void visualModeSurvivesRandomUse() {
+        // Runs in a child confined to its own temporary folder, so random
+        // navigation can never act on anything outside it.
+        if (!qEnvironmentVariableIsSet("SCOUT_STRESS_CHILD")) {
+            QProcess child;
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            const QString childTmp = m_root.path() + QStringLiteral("/stress-child");
+            QVERIFY(QDir().mkpath(childTmp));
+            env.insert(QStringLiteral("SCOUT_STRESS_CHILD"), QStringLiteral("1"));
+            // The child's own temporary folder, which is all it may write to.
+            env.insert(QStringLiteral("TMPDIR"), childTmp);
+            child.setProcessEnvironment(env);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(QCoreApplication::applicationFilePath(), {QStringLiteral("visualModeSurvivesRandomUse")});
+            QVERIFY(child.waitForFinished(10 * 60 * 1000));
+            const QString output = QString::fromLocal8Bit(child.readAll());
+            for (const QString &line : output.split(u'\n'))
+                if (line.contains(QLatin1String("visual-mode checks")) || line.contains(QLatin1String("SKIP")))
+                    qInfo("child: %s", qPrintable(line.trimmed()));
+            QVERIFY2(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0, qPrintable(output));
+            if (output.contains(QLatin1String("SKIP   : ScoutTest::visualModeSurvivesRandomUse")))
+                QSKIP("Landlock is unavailable");
+            return;
+        }
+        if (!confineWritesTo(QDir::tempPath()))
+            QSKIP("Landlock is unavailable, and this test only runs confined");
+        const QString outside = QFileInfo(QDir::tempPath()).absolutePath() + QStringLiteral("/scout-landlock-probe");
+        const int probe = ::open(QFile::encodeName(outside).constData(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (probe >= 0) {
+            ::close(probe);
+            ::unlink(QFile::encodeName(outside).constData());
+        }
+        QVERIFY2(probe < 0 && errno == EACCES, "Landlock did not confine the test");
+
+        const QString base = m_root.path() + QStringLiteral("/stress");
+        for (int i = 0; i < 60; ++i)
+            writeFile(base + QStringLiteral("/f%1.txt").arg(i));
+        for (int d = 0; d < 4; ++d)
+            for (int i = 0; i < 15; ++i)
+                writeFile(base + QStringLiteral("/dir%1/g%2").arg(d).arg(i));
+        MainWindow w(base, false);
+        w.resize(900, 500);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+
+        bool seeded = false;
+        const int seed = qEnvironmentVariableIntValue("SCOUT_STRESS_SEED", &seeded);
+        std::mt19937 rng(seeded ? seed : 20261028);
+        auto pick = [&rng](int n) { return int(std::uniform_int_distribution<int>(0, n - 1)(rng)); };
+        static const char *motions[] = {"j", "k", "G", "gg", "5j", "3k", "12j", "2G"};
+        int created = 0;
+        int visualChecks = 0;
+        QSignalSpy refreshes(w.currentModel(), &DirModel::refreshed);
+        auto touchFiles = [&] {
+            const QString dir = base + (pick(2) ? QString() : QStringLiteral("/dir%1").arg(pick(4)));
+            if (pick(2)) {
+                writeFile(dir + QStringLiteral("/new%1").arg(++created));
+                return;
+            }
+            QString err;
+            const QVector<FileEntry> entries = listDirectory(dir, &err);
+            const FileEntry *victim = entries.isEmpty() ? nullptr : &entries[pick(int(entries.size()))];
+            if (victim && !victim->isDir)
+                QFile::remove(victim->path);
+        };
+        // Things that end visual mode, kept rarer so most steps run inside it.
+        auto leaveVisual = [&] {
+            switch (pick(8)) {
+            case 0: key(w, Qt::Key_Space); break;
+            case 1: {
+                // Never above `base`, and never `l` on a file, which would launch its app.
+                const FileEntry *e = w.currentEntry();
+                if (e && e->isDir && (pick(3) || w.cwd() == base))
+                    keys(w, QStringLiteral("l"));
+                else if (w.cwd() != base)
+                    keys(w, QStringLiteral("h"));
+                break;
+            }
+            case 2: keys(w, QStringLiteral("H")); break;
+            case 3:
+                if (w.tabCount() < 4 && pick(2))
+                    w.runCommandLine(QStringLiteral("new-tab"));
+                else if (w.tabCount() > 1 && pick(2))
+                    w.runCommandLine(QStringLiteral("close-tab"));
+                else
+                    w.runCommandLine(QStringLiteral("next-tab"));
+                break;
+            case 4: w.runCommandLine(pick(2) ? QStringLiteral("invert-marks") : QStringLiteral("unmark-all")); break;
+            case 5: key(w, Qt::Key_Escape); break;
+            case 6: w.runCommandLine(QStringLiteral("reload")); break;
+            default: keys(w, QStringLiteral("V")); break;
+            }
+        };
+        for (int step = 0; step < 3000; ++step) {
+            switch (pick(20)) {
+            case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+                keys(w, QLatin1String(motions[pick(int(std::size(motions)))]));
+                break;
+            case 8:
+                key(w, pick(2) ? Qt::Key_D : Qt::Key_U, Qt::ControlModifier);
+                break;
+            case 9: case 10:
+                if (!w.isVisualMode())
+                    keys(w, pick(2) ? QStringLiteral("v") : QStringLiteral("V"));
+                break;
+            case 11:
+                w.currentModel()->setFilter(pick(2) ? QString() : QString::number(pick(10)));
+                break;
+            case 12:
+                // What the folder watcher does when something changes.
+                w.currentModel()->reload();
+                break;
+            case 13: case 14:
+                touchFiles();
+                break;
+            case 15:
+                leaveVisual();
+                break;
+            default:
+                QTest::qWait(pick(25));
+                break;
+            }
+            QCoreApplication::processEvents();
+            QVERIFY2(w.cwd() == base || w.cwd().startsWith(base + u'/'), qPrintable(w.cwd()));
+            QVERIFY(w.isVisible());
+            QVERIFY(w.tabCount() >= 1);
+            QVERIFY(w.cursorRow() < w.currentModel()->rowCount());
+            DirModel *model = w.currentModel();
+            if (w.isVisualMode() && model->isLoaded() && !model->isLoading() && model->path() == w.cwd()) {
+                if (const FileEntry *e = w.currentEntry()) {
+                    QVERIFY2(w.marks()->contains(e->path), qPrintable(QStringLiteral("step %1: %2").arg(step).arg(e->path)));
+                    ++visualChecks;
+                }
+            }
+        }
+        qInfo("visual-mode checks: %d, listing refreshes: %d", visualChecks, int(refreshes.size()));
+        QVERIFY(visualChecks > 300);
+        QVERIFY(refreshes.size() > 100);
+        QVERIFY(m_launches.isEmpty());
+    }
+
     void undoTrashMoveRenameAndCopy() {
         const QString base = makeTree();
         MainWindow w(base, false);
@@ -1476,6 +1700,315 @@ private slots:
         QVERIFY(service::resultsFromChooser(r, ChooserResult{}).isEmpty());
     }
 
+    void goKeysAndRemovedBindings() {
+        const QString downloads = m_root.path() + QStringLiteral("/my downloads");
+        QVERIFY(QDir().mkpath(downloads));
+        writeFile(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/user-dirs.dirs"),
+                  "XDG_DOWNLOAD_DIR=\"" + downloads.toUtf8() + "\"\n");
+        const QString base = makeTree();
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        keys(w, QStringLiteral("gd"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), downloads);
+
+        for (const char *gone : {"!", "gT", "gD", "gv", "gM", "gm"}) {
+            const QStringList seq = KeyMap::parseSequence(QLatin1String(gone));
+            const QList<Binding> all = w.keymap()->bindings();
+            QVERIFY2(std::none_of(all.begin(), all.end(), [&](const Binding &b) { return b.keys == seq; }), gone);
+        }
+        QVERIFY(!w.runCommandLine(QStringLiteral("shell true")));
+
+        w.runCommandLine(QStringLiteral("cd ") + base);
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        w.runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/beta"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.currentTab(), 2);
+        keys(w, QStringLiteral("gp"));
+        QCOMPARE(w.currentTab(), 1);
+        keys(w, QStringLiteral("gp"));
+        QCOMPARE(w.currentTab(), 0);
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(w.cwd(), base);
+
+        const double size = Theme::instance().font().pointSizeF();
+        key(w, Qt::Key_Equal, Qt::ControlModifier);
+        key(w, Qt::Key_Equal, Qt::ControlModifier);
+        QCOMPARE(Theme::instance().font().pointSizeF(), size + 2);
+        key(w, Qt::Key_0, Qt::ControlModifier);
+        QCOMPARE(Theme::instance().font().pointSizeF(), Theme::instance().defaultFontSize());
+        QFile::remove(qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/user-dirs.dirs"));
+    }
+
+    void zoomIsRememberedAndReset() {
+        Theme &theme = Theme::instance();
+        const double systemSize = theme.defaultFontSize();
+        theme.resetZoom();
+        QVERIFY(!state::fontSize());
+        const QString conf = qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/scout/scout.conf");
+        writeFile(conf, "set font-size 9\n");
+        const QString base = makeTree();
+        {
+            MainWindow w(base, true);
+            QCOMPARE(theme.font().pointSizeF(), 9.0);
+            w.runCommandLine(QStringLiteral("zoom-in"));
+            w.runCommandLine(QStringLiteral("zoom-in"));
+            QCOMPARE(theme.font().pointSizeF(), 11.0);
+            QCOMPARE(state::fontSize(), std::optional<double>(11.0));
+        }
+        // The next start: the remembered size beats the config's default.
+        theme.setFontSize(systemSize);
+        theme.restoreZoom();
+        {
+            MainWindow w(base, true);
+            QCOMPARE(theme.font().pointSizeF(), 11.0);
+            QCOMPARE(theme.defaultFontSize(), 9.0);
+            key(w, Qt::Key_0, Qt::ControlModifier);
+            QCOMPARE(theme.font().pointSizeF(), 9.0);
+            QVERIFY(!state::fontSize());
+            // Typing `set font-size` replaces a remembered zoom.
+            w.runCommandLine(QStringLiteral("zoom-out"));
+            QVERIFY(state::fontSize());
+            w.runCommandLine(QStringLiteral("set font-size 14"));
+            QCOMPARE(theme.font().pointSizeF(), 14.0);
+            QVERIFY(!state::fontSize());
+            // Even a zoom saved by another scout process.
+            state::setFontSize(15.0);
+            w.runCommandLine(QStringLiteral("set font-size 13"));
+            QVERIFY(!state::fontSize());
+        }
+        QVERIFY(QFile::remove(conf));
+        theme.setFontSize(systemSize, true);
+    }
+
+    void tabsRestoredOnlyWithoutAPath() {
+        const QString base = makeTree();
+        const QString alpha = base + QStringLiteral("/alpha"), beta = base + QStringLiteral("/beta");
+        state::setSession({{alpha, base + QStringLiteral("/gone"), beta}, 2});
+        {
+            const auto w = startup::openWindow({}, false);
+            QCOMPARE(w->tabCount(), 2);
+            QCOMPARE(w->currentTab(), 1);
+            QCOMPARE(w->cwd(), beta);
+            w->runCommandLine(QStringLiteral("tab 1"));
+            QCOMPARE(w->cwd(), alpha);
+            w->runCommandLine(QStringLiteral("new-tab ") + base);
+            QCOMPARE(w->currentTab(), 1);
+            w->show();
+            w->close();
+        }
+        // Closing saved the window's tabs.
+        QCOMPARE(state::session()->tabs, (QStringList{alpha, base, beta}));
+        QCOMPARE(state::session()->active, 1);
+        {
+            const auto w = startup::openWindow({beta}, false);
+            QCOMPARE(w->tabCount(), 1);
+            QCOMPARE(w->cwd(), beta);
+        }
+        // FileManager1 windows open just their folder.
+        const QList<MainWindow *> shown = service::showItems({alpha}, true);
+        QCOMPARE(shown.size(), 1);
+        QCOMPARE(shown[0]->tabCount(), 1);
+        QCOMPARE(shown[0]->cwd(), alpha);
+        qDeleteAll(shown);
+        // A chooser leaves the saved tabs alone.
+        {
+            MainWindow chooser(base, false);
+            ChooserRequest request;
+            request.currentFolder = alpha;
+            chooser.setChooser(request, [](const ChooserResult &) {});
+            chooser.show();
+            chooser.close();
+        }
+        QCOMPARE(state::session()->tabs, (QStringList{alpha, base, beta}));
+
+        state::setSession({{base + QStringLiteral("/gone")}, 0});
+        const auto w = startup::openWindow({}, false);
+        QCOMPARE(w->tabCount(), 1);
+        QCOMPARE(w->cwd(), QDir::homePath());
+    }
+
+    void defaultBindingsNeverShadowEachOther() {
+        MainWindow w(m_root.path(), false);
+        const QList<Binding> all = w.defaultKeys().bindings();
+        for (const Binding &a : all)
+            for (const Binding &b : all)
+                QVERIFY2(a.keys == b.keys || b.keys.mid(0, a.keys.size()) != a.keys,
+                         qPrintable(a.keys.join(QString()) + QStringLiteral(" / ") + b.keys.join(QString())));
+        QVERIFY(std::none_of(all.begin(), all.end(), [](const Binding &b) { return b.fromConfig; }));
+        QVERIFY(config::analyze(QString(), w.commands(), w.defaultKeys()).errors.isEmpty());
+    }
+
+    void configCheckFindsErrorsAndOverrides() {
+        MainWindow w(m_root.path(), false);
+        const ConfigReport r = config::analyze(QStringLiteral("# a comment\n"
+                                                              "set hidden yes\n"
+                                                              "set hidden maybe\n"
+                                                              "set colour red\n"
+                                                              "bogus\n"
+                                                              "map gd cd /tmp\n"
+                                                              "map g cd ~\n"
+                                                              "map ggx top\n"
+                                                              "map zz nope\n"
+                                                              "map <Foo> top\n"
+                                                              "unmap q\n"
+                                                              "unmap zq\n"
+                                                              "map <C-y> 'set theme pink'\n"
+                                                              // One error per pair, at the later line.
+                                                              "map ab top\n"
+                                                              "map a down\n"
+                                                              "mkdir\n"
+                                                              "map '' top\n"
+                                                              "map zx ''\n"
+                                                              "map zs sort\n"
+                                                              "map zt set\n"),
+                                               w.commands(), w.defaultKeys());
+        const QStringList expected = {
+            QStringLiteral("line 3: hidden takes true, false or toggle, not maybe"),
+            QStringLiteral("line 4: unknown option: colour"),
+            QStringLiteral("line 5: unknown command bogus"),
+            QStringLiteral("line 7: map g is a prefix of other bindings (g/, gb, gc, gd, gg, gh and 5 more), so it only runs after a pause"),
+            QStringLiteral("line 8: map ggx starts with g, which is bound on its own, so g only runs after a pause"),
+            QStringLiteral("line 8: map ggx starts with gg, which is bound on its own, so gg only runs after a pause"),
+            QStringLiteral("line 9: map zz: unknown command nope"),
+            QStringLiteral("line 10: map <Foo>: unknown key <Foo>"),
+            QStringLiteral("line 13: map <C-y>: theme takes auto, dark or light"),
+            QStringLiteral("line 15: map a is a prefix of other bindings (ab), so it only runs after a pause"),
+            QStringLiteral("line 16: mkdir needs <name>"),
+            QStringLiteral("line 17: map needs keys before the command"),
+            QStringLiteral("line 18: map zx: no command"),
+        };
+        QCOMPARE(r.errors, expected);
+        QCOMPARE(r.notes, (QStringList{
+                              QStringLiteral("line 6: map gd overrides the default gd (%1)").arg(w.defaultKeys().binding(QStringLiteral("gd"))->command),
+                              QStringLiteral("line 11: unmap q removes the default q (close-tab)"),
+                              QStringLiteral("line 12: unmap zq does nothing; zq isn't bound"),
+                              QStringLiteral("line 15: map a overrides the default a (create)"),
+                          }));
+        QCOMPARE(r.lines.size(), 19);
+        // A mapped command without arguments opens its prompt.
+        QVERIFY(r.lines[17].run && r.lines[18].run);
+        QVERIFY(r.lines[0].run);
+        QVERIFY(!r.lines[1].run);
+        QVERIFY(r.lines[6].run); // shadowing still binds
+
+        const QString good = m_root.path() + QStringLiteral("/good.conf"), bad = m_root.path() + QStringLiteral("/bad.conf");
+        writeFile(good, "set sort modified reverse\nmap gw cd '~/my work'\nunmap gr\n");
+        writeFile(bad, "set sort sideways\n");
+        auto check = [](const QStringList &args, int *code) {
+            QProcess p;
+            p.start(QCoreApplication::applicationDirPath() + QStringLiteral("/scout"), QStringList{QStringLiteral("--check-config")} + args);
+            p.waitForFinished(60000);
+            *code = p.exitStatus() == QProcess::NormalExit ? p.exitCode() : -1;
+            return QString::fromUtf8(p.readAllStandardOutput());
+        };
+        int code = 0;
+        QString out = check({good}, &code);
+        QCOMPARE(code, 0);
+        QCOMPARE(out, QStringLiteral("scout.conf: %1\ninfo:\n  line 3: unmap gr removes the default gr (cd ~/repos)\nno errors\n").arg(good));
+        out = check({bad}, &code);
+        QCOMPARE(code, 1);
+        QCOMPARE(out, QStringLiteral("scout.conf: %1\nerrors:\n  line 1: sort takes name, size, modified or extension, then optionally reverse\n1 error\n").arg(bad));
+        out = check({m_root.path() + QStringLiteral("/missing.conf")}, &code);
+        QCOMPARE(code, 1);
+        // Without a file it checks the usual config, which these tests don't have.
+        out = check({}, &code);
+        QCOMPARE(code, 0);
+        QVERIFY2(out.startsWith(QStringLiteral("no config at ")), qPrintable(out));
+    }
+
+    void configErrorsReachStatusBarAndLog() {
+        const QString log = m_root.path() + QStringLiteral("/log-config/scout.log");
+        QVERIFY(logging::open(log));
+        const QString conf = qEnvironmentVariable("XDG_CONFIG_HOME") + QStringLiteral("/scout/scout.conf");
+        writeFile(conf, "bogus\nmap gw cd /tmp\nset preview nah\n");
+        MainWindow w(m_root.path(), true);
+        const QString message = QStringLiteral("scout.conf: line 1: unknown command bogus; line 3: preview takes true, false or toggle, not nah");
+        QCOMPARE(w.statusBar()->message(), message);
+        QVERIFY(readAll(log).contains(QStringLiteral("] E ") + message));
+        QVERIFY(w.keymap()->isFromConfig(QStringLiteral("gw")));
+        QVERIFY(!w.keymap()->isFromConfig(QStringLiteral("j")));
+        w.runCommandLine(QStringLiteral("map gq cd /"));
+        QVERIFY(w.keymap()->binding(QStringLiteral("gq")));
+        QVERIFY(!w.keymap()->isFromConfig(QStringLiteral("gq")));
+        logging::close();
+        QVERIFY(QFile::remove(conf));
+    }
+
+    void logWritesLinesAndRotates() {
+        const QString path = m_root.path() + QStringLiteral("/log-rotate/scout.log");
+        QVERIFY(logging::open(path, 4096));
+        logging::info(QStringLiteral("first line"));
+        logging::warning(QStringLiteral("two\nlines"));
+        const QString first = readAll(path);
+        const QString pid = QString::number(QCoreApplication::applicationPid());
+        QVERIFY2(first.contains(QRegularExpression(QStringLiteral("^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d{3} \\[%1\\] I first line\n").arg(pid))),
+                 qPrintable(first));
+        QVERIFY(first.contains(QStringLiteral("] W two\n    lines\n")));
+        for (int i = 0; i < 100; ++i)
+            logging::info(QStringLiteral("filler %1 ").arg(i) + QString(60, u'x'));
+        logging::info(QStringLiteral("last line"));
+        logging::close();
+        QVERIFY(QFile::exists(path + QStringLiteral(".1")));
+        QVERIFY(!QFile::exists(path + QStringLiteral(".2")));
+        QVERIFY(QFileInfo(path).size() <= 4096 + 200);
+        QVERIFY(QFileInfo(path + QStringLiteral(".1")).size() >= 4096);
+        QVERIFY(readAll(path).contains(QStringLiteral("last line")));
+        QVERIFY(!readAll(path).contains(QStringLiteral("first line")));
+        // Nothing is written once closed.
+        logging::info(QStringLiteral("after close"));
+        QVERIFY(!readAll(path).contains(QStringLiteral("after close")));
+    }
+
+    void statusErrorsTasksAndClosesAreLogged() {
+        const QString path = m_root.path() + QStringLiteral("/log-window/scout.log");
+        QVERIFY(logging::open(path));
+        const QString base = makeTree();
+        auto *w = new MainWindow(base, false);
+        w->show();
+        QTRY_VERIFY(w->isIdle());
+        w->runCommandLine(QStringLiteral("cd /no/such/folder"));
+        QVERIFY(readAll(path).contains(QStringLiteral("] E no such directory: /no/such/folder")));
+        w->tasks()->start(Task::Copy, {base + QStringLiteral("/missing")}, base + QStringLiteral("/beta"));
+        QTRY_VERIFY(readAll(path).contains(QStringLiteral("] E task failed: Copying missing to beta")));
+
+        w->runCommandLine(QStringLiteral("new-tab ") + base + QStringLiteral("/alpha"));
+        QTRY_VERIFY(w->isIdle());
+        keys(*w, QStringLiteral("q"));
+        QVERIFY(readAll(path).contains(QStringLiteral("tab 2 of 2 closed by close-tab (key q): ") + base + QStringLiteral("/alpha")));
+        key(*w, Qt::Key_W, Qt::ControlModifier);
+        QVERIFY(!w->isVisible());
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by close-tab on the last tab (key <C-w>): ") + base));
+        w->show();
+        w->runCommandLine(QStringLiteral("quit"));
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by quit (command)")));
+        w->show();
+        w->close();
+        QVERIFY(readAll(path).contains(QStringLiteral("window closed by the window manager")));
+        delete w;
+        logging::close();
+    }
+
+    void crashHandlerLogsSignalAndBacktrace() {
+        char line[160];
+        // 2026-10-28 23:20:01.234 UTC, shown at UTC-4.
+        const size_t n = logging::formatSignal(line, sizeof line, SIGSEGV, 4242, 1793229601234LL, -4 * 3600);
+        QCOMPARE(QByteArray(line, int(n)), QByteArray("2026-10-28 19:20:01.234 [4242] F crash: signal 11 (SIGSEGV), backtrace follows\n"));
+        QVERIFY(logging::formatSignal(line, 12, SIGTERM, 1, 0, 0) == 11);
+
+        const QString path = m_root.path() + QStringLiteral("/log-crash/scout.log");
+        QProcess child;
+        child.start(QCoreApplication::applicationFilePath(), {QStringLiteral("--crash-child"), path});
+        QVERIFY(child.waitForFinished(30000));
+        QCOMPARE(child.exitStatus(), QProcess::CrashExit);
+        const QString log = readAll(path);
+        QVERIFY2(log.contains(QStringLiteral("I about to crash")), qPrintable(log));
+        QVERIFY2(log.contains(QStringLiteral("] F crash: signal 11 (SIGSEGV), backtrace follows")), qPrintable(log));
+        // backtrace_symbols_fd lines: "binary(symbol+0x..) [0x...]".
+        QVERIFY2(log.contains(QStringLiteral("scout_tests(")) && log.contains(QStringLiteral(") [0x")), qPrintable(log));
+    }
+
     void showItemsGroupsByFolder() {
         const QString base = makeTree();
         const QList<MainWindow *> windows = service::showItems(
@@ -1493,5 +2026,13 @@ private slots:
     }
 };
 
-QTEST_MAIN(ScoutTest)
+int main(int argc, char *argv[]) {
+    if (argc == 3 && std::strcmp(argv[1], "--crash-child") == 0)
+        crashChild(argv[2]);
+    QApplication app(argc, argv);
+    app.setAttribute(Qt::AA_Use96Dpi, true);
+    ScoutTest test;
+    QTEST_SET_MAIN_SOURCE_PATH
+    return QTest::qExec(&test, argc, argv);
+}
 #include "test_scout.moc"

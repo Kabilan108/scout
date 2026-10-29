@@ -7,6 +7,26 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SCOUT_PLUGIN_DIRS "" CACHE STRING "Extra Qt plugin directories baked into the binary (semicolon separated)")
+set(SCOUT_COMMIT "" CACHE STRING "Git commit shown by --version; read from git at configure time when empty")
+option(SCOUT_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+if(SCOUT_SANITIZE)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(NOT SCOUT_COMMIT)
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --dirty --abbrev=7 --exclude=*
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE SCOUT_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  endif()
+  set(SCOUT_COMMIT "${SCOUT_GIT_COMMIT}")
+  if(NOT SCOUT_COMMIT)
+    set(SCOUT_COMMIT "unknown")
+  endif()
+endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets DBus Concurrent Test)
 find_package(KF6SyntaxHighlighting REQUIRED)
@@ -29,7 +49,14 @@ add_library(scoutcore STATIC
   src/chooser.cpp
   src/mainwindow.cpp
   src/service.cpp
+  src/launcher.cpp
+  src/logging.cpp
+  src/buildinfo.cpp
+  src/state.cpp
+  src/startup.cpp
+  src/config.cpp
 )
+set_source_files_properties(src/buildinfo.cpp PROPERTIES COMPILE_DEFINITIONS "SCOUT_COMMIT=\"${SCOUT_COMMIT}\"")
 target_include_directories(scoutcore PUBLIC src)
 target_link_libraries(scoutcore PUBLIC
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::DBus Qt6::Concurrent
@@ -47,6 +74,8 @@ endif()
 
 add_executable(scout src/main.cpp)
 target_link_libraries(scout PRIVATE scoutcore)
+# Exports the binary's symbols so crash backtraces in scout.log have function names.
+set_target_properties(scout PROPERTIES ENABLE_EXPORTS ON)
 
 include(GNUInstallDirs)
 install(TARGETS scout RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
