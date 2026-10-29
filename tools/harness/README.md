@@ -41,9 +41,13 @@ screenshots in `out/`, scout's log in `xdg/state/scout/scout.log`.
    `light-*`. Done when each changed surface appears in a shot and reads
    correctly. If a shot doesn't show the surface (a popup that never opened),
    fix the flow and run again.
-4. For dialog changes, `portal-e2e.sh` checks its own results: exit 0 means
-   every dialog returned the expected path, the cancelled one closed, and "Show
-   in folder" opened a window.
+4. For dialog changes, run `portal-e2e.sh` the same way. It checks its own
+   results: exit 0 means every dialog returned the expected path, the
+   cancelled one closed, and "Show in folder" opened a window.
+
+   ```sh
+   nix develop -c tools/harness/portal-e2e.sh result/bin/scout > /tmp/portal-e2e.log 2>&1; echo "exit=$?"
+   ```
 
 ## Adding a flow
 

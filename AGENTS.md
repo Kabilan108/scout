@@ -1,9 +1,9 @@
 # scout
 
 A keyboard-first, ranger-style file manager: Qt 6 Widgets, C++20, CMake, Nix.
-Tony uses it daily on niri in place of Nautilus. Through `~/dotfiles` it is
-also his file chooser for other apps (an xdg-desktop-portal backend) and the
-"Show in folder" target (`org.freedesktop.FileManager1`).
+Through `~/dotfiles` it replaces Nautilus for Tony, including as the file
+chooser for other apps (an xdg-desktop-portal backend) and the "Show in folder"
+target (`org.freedesktop.FileManager1`).
 
 ## Where things live
 
