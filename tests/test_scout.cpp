@@ -655,6 +655,14 @@ private slots:
         QVERIFY(w.picker()->items().isEmpty());
         QCOMPARE(w.picker()->emptyTitle(), QStringLiteral("No commands match “qqxqz”"));
         key(w, Qt::Key_Escape);
+        // Enter on a search that matched nothing runs nothing, even if it starts with a command.
+        const bool hidden = w.options().showHidden;
+        key(w, Qt::Key_K, Qt::ControlModifier);
+        keys(w, QStringLiteral("toggle-hidden xyz"));
+        QVERIFY(w.picker()->items().isEmpty());
+        key(w, Qt::Key_Return);
+        QVERIFY(!w.prompt()->isOpen());
+        QCOMPARE(w.options().showHidden, hidden);
         // The old command names open the same palette.
         for (const char *name : {"help", "command"}) {
             w.runCommandLine(QLatin1String(name));

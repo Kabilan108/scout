@@ -1721,8 +1721,11 @@ void MainWindow::promptCommand(const QString &initial) {
             runCommandLine(data.mid(5));
         } else if (data.startsWith(QLatin1String("complete:"))) {
             runCommandLine(data.mid(9).trimmed());
-        } else if (!line.isEmpty()) {
+        } else if (data == QLatin1String("line")) {
             runCommandLine(line);
+        } else if (!line.isEmpty()) {
+            // A search with no matching row runs nothing: "trash notes" must not trash the selection.
+            message(QStringLiteral("no command matches “%1”").arg(line));
         }
     };
     openPrompt(spec);
