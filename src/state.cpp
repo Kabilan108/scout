@@ -7,9 +7,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QStandardPaths>
 
+#include <fcntl.h>
 #include <functional>
+#include <sys/file.h>
+#include <unistd.h>
 
 namespace {
 
@@ -20,11 +24,20 @@ QJsonObject load() {
     return QJsonDocument::fromJson(f.readAll()).object();
 }
 
-// QSaveFile writes a temporary file and renames it over the old one.
+// QSaveFile writes a temporary file and renames it over the old one. The lock
+// keeps another scout process from saving in between our read and our write.
 void update(const std::function<void(QJsonObject &)> &change) {
+    QDir().mkpath(QFileInfo(state::path()).absolutePath());
+    const int lock = ::open(QFile::encodeName(state::path() + QStringLiteral(".lock")).constData(),
+                            O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (lock >= 0)
+        flock(lock, LOCK_EX);
+    const auto unlock = qScopeGuard([lock] {
+        if (lock >= 0)
+            ::close(lock);
+    });
     QJsonObject root = load();
     change(root);
-    QDir().mkpath(QFileInfo(state::path()).absolutePath());
     QSaveFile f(state::path());
     if (!f.open(QIODevice::WriteOnly)) {
         qWarning("could not write %s: %s", qPrintable(state::path()), qPrintable(f.errorString()));
