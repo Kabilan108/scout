@@ -195,7 +195,7 @@ info:
   line 9: unmap q removes the default q (close-tab)
 errors:
   line 3: unknown command frobnicate
-  line 8: map g is a prefix of other bindings (g/, gb, gc, gd, gf, gg and 6 more), so it only runs after a pause
+  line 8: map g is a prefix of other bindings (g/, gb, gc, gd, gg, gh and 5 more), so it only runs after a pause
 2 errors
 ```
 

@@ -528,8 +528,12 @@ void MainWindow::onCursorMoved() {
     updateStatus();
     // The cursor can move under an open search bar, by mouse or a reload.
     if (m_searching && m_prompt->isOpen()) {
-        if (const QString position = searchPosition(NameMatcher(m_prompt->text())); !position.isEmpty())
+        const QString text = m_prompt->text();
+        const QString position = searchPosition(NameMatcher(text));
+        if (!position.isEmpty())
             m_prompt->setInfo(position);
+        else if (!text.isEmpty())
+            m_prompt->setInfo(QStringLiteral("no matches"), Theme::p().red);
     }
     m_previewTimer.start();
 }

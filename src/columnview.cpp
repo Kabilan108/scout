@@ -221,7 +221,7 @@ void EntryDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
         nameColor = pal.red;
     else if (e->isSymlink)
         nameColor = pal.cyan;
-    const QColor rowBg = isCurrent ? pal.surface : (view && view->role() == ColumnView::Role::Parent ? pal.mantle : pal.base);
+    const QColor rowBg = isCurrent || dropTarget ? pal.surface : (view && view->role() == ColumnView::Role::Parent ? pal.mantle : pal.base);
     // Dimmed, but never below readable contrast.
     if (e->isHidden() && !marked)
         nameColor = Palette::readable(Palette::mix(nameColor, rowBg, 0.35), {rowBg}, nameColor);
