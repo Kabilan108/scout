@@ -40,6 +40,13 @@ LogState &state() {
 std::atomic<int> g_fd{-1};
 std::atomic<long> g_utcOffset{0};
 std::atomic<bool> g_exitLogged{false};
+char g_signalPath[4096]; // the log's path, for the signal handler
+
+// True if `fd` no longer is the file at `path`: another process rotated it.
+bool isStale(int fd, const char *path) {
+    struct stat ours {}, onDisk {};
+    return fstat(fd, &ours) != 0 || stat(path, &onDisk) != 0 || onDisk.st_ino != ours.st_ino || onDisk.st_dev != ours.st_dev;
+}
 
 void writeAll(int fd, const char *data, size_t size) {
     while (size > 0) {
@@ -59,16 +66,13 @@ int openFile(const QByteArray &path) { return ::open(path.constData(), O_WRONLY 
 // it aside, and the others follow once they see their descriptor is stale.
 void rotateIfNeeded(LogState &s) {
     const int fd = g_fd.load();
-    struct stat ours {}, onDisk {};
-    auto replaced = [&] {
-        return stat(s.path.constData(), &onDisk) != 0 || onDisk.st_ino != ours.st_ino || onDisk.st_dev != ours.st_dev;
-    };
-    if (fd < 0 || fstat(fd, &ours) != 0 || (!replaced() && ours.st_size < s.maxBytes))
+    struct stat ours {};
+    if (fd < 0 || fstat(fd, &ours) != 0 || (!isStale(fd, s.path.constData()) && ours.st_size < s.maxBytes))
         return;
     // Everyone still writing to this file locks the same inode, so only the
     // first to get here renames it; the rest see it replaced and reopen.
     flock(fd, LOCK_EX);
-    if (!replaced())
+    if (!isStale(fd, s.path.constData()))
         ::rename(s.path.constData(), (s.path + ".1").constData());
     const int next = openFile(s.path);
     g_fd.store(next);
@@ -154,7 +158,11 @@ void onSignal(int sig) {
     char line[160];
     const size_t n = logging::formatSignal(line, sizeof line, sig, long(getpid()),
                                            (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000, g_utcOffset.load());
-    const int fd = g_fd.load();
+    int fd = g_fd.load();
+    // Another process may have rotated the file away; open() and stat() are signal-safe.
+    if (fd >= 0 && g_signalPath[0] && isStale(fd, g_signalPath))
+        if (const int fresh = ::open(g_signalPath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644); fresh >= 0)
+            fd = fresh;
     writeAll(STDERR_FILENO, line, n);
     if (fd >= 0)
         writeAll(fd, line, n);
@@ -195,6 +203,7 @@ bool logging::open(const QString &path, qint64 maxBytes) {
         ::close(old);
     QDir().mkpath(QFileInfo(path).absolutePath());
     s.path = QFile::encodeName(path);
+    qstrncpy(g_signalPath, s.path.constData(), sizeof g_signalPath);
     s.maxBytes = maxBytes;
     s.enabled = true;
     g_fd.store(openFile(s.path));
@@ -210,6 +219,7 @@ void logging::close() {
     std::lock_guard lock(s.mutex);
     if (const int fd = g_fd.exchange(-1); fd >= 0)
         ::close(fd);
+    g_signalPath[0] = '\0';
     s.enabled = false;
 }
 
@@ -235,10 +245,10 @@ void logging::write(Level level, const QString &text) {
                                 .arg(body)
                                 .toUtf8();
     writeAll(STDERR_FILENO, line.constData(), size_t(line.size()));
-    if (g_fd.load() < 0)
-        return;
-    writeAll(g_fd.load(), line.constData(), size_t(line.size()));
+    // Before writing: an idle process's descriptor may point at a rotated, even deleted, file.
     rotateIfNeeded(s);
+    if (g_fd.load() >= 0)
+        writeAll(g_fd.load(), line.constData(), size_t(line.size()));
 }
 
 void logging::installMessageHandler() { qInstallMessageHandler(messageHandler); }
