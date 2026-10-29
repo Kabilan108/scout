@@ -18,6 +18,7 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <mutex>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -59,12 +60,15 @@ int openFile(const QByteArray &path) { return ::open(path.constData(), O_WRONLY 
 void rotateIfNeeded(LogState &s) {
     const int fd = g_fd.load();
     struct stat ours {}, onDisk {};
-    if (fd < 0 || fstat(fd, &ours) != 0)
+    auto replaced = [&] {
+        return stat(s.path.constData(), &onDisk) != 0 || onDisk.st_ino != ours.st_ino || onDisk.st_dev != ours.st_dev;
+    };
+    if (fd < 0 || fstat(fd, &ours) != 0 || (!replaced() && ours.st_size < s.maxBytes))
         return;
-    const bool replaced = stat(s.path.constData(), &onDisk) != 0 || onDisk.st_ino != ours.st_ino || onDisk.st_dev != ours.st_dev;
-    if (!replaced && ours.st_size < s.maxBytes)
-        return;
-    if (!replaced)
+    // Everyone still writing to this file locks the same inode, so only the
+    // first to get here renames it; the rest see it replaced and reopen.
+    flock(fd, LOCK_EX);
+    if (!replaced())
         ::rename(s.path.constData(), (s.path + ".1").constData());
     const int next = openFile(s.path);
     g_fd.store(next);
