@@ -1069,7 +1069,15 @@ void MainWindow::showKeyMap() {
         groups[group].entries.append({line.keys.join(u' '), line.description});
     }
     std::sort(tabKeys.begin(), tabKeys.end());
-    if (tabKeys.size() >= 3)
+    // Only a run like Alt-1 … Alt-9, the same key with the number swapped, collapses.
+    auto pattern = [](const QPair<int, QString> &t) {
+        const QString n = QString::number(t.first);
+        return t.second.count(n) == 1 ? QString(t.second).replace(n, QStringLiteral("#")) : QString();
+    };
+    bool range = tabKeys.size() >= 3 && !pattern(tabKeys.first()).isEmpty();
+    for (int i = 1; range && i < tabKeys.size(); ++i)
+        range = tabKeys[i].first == tabKeys[i - 1].first + 1 && pattern(tabKeys[i]) == pattern(tabKeys.first());
+    if (range)
         groups[layout.size() - 1].entries.append(
             {tabKeys.first().second + QStringLiteral("…") + tabKeys.last().second, QStringLiteral("Go to tab N")});
     else

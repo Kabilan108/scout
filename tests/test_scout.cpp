@@ -691,6 +691,22 @@ private slots:
         }
         // A fifth key for one command still shows.
         QVERIFY2(leaveKeys.contains(QStringLiteral("Alt-q")), qPrintable(leaveKeys));
+        auto tabEntries = [&] {
+            QStringList out;
+            for (const KeyMapSheet::Group &g : w.keyMapSheet()->groups())
+                for (const KeyMapSheet::Entry &e : g.entries)
+                    if (e.description.startsWith(QLatin1String("Go to tab")))
+                        out << e.keys + u' ' + e.description;
+            return out;
+        };
+        QCOMPARE(tabEntries(), QStringList{QStringLiteral("Alt-1…Alt-9 Go to tab N")});
+        key(w, Qt::Key_Escape);
+        // A remapped tab key breaks the range up rather than hiding behind it.
+        w.runCommandLine(QStringLiteral("unmap <A-5>"));
+        w.runCommandLine(QStringLiteral("map X tab 5"));
+        w.runCommandLine(QStringLiteral("keymap"));
+        QVERIFY(tabEntries().contains(QStringLiteral("X Go to tab 5")));
+        QVERIFY(!tabEntries().join(u' ').contains(QStringLiteral("Alt-5")));
         QCOMPARE(titles.mid(0, 9), (QStringList{QStringLiteral("Move"), QStringLiteral("Go"), QStringLiteral("Select"),
                                                QStringLiteral("Copy & move"), QStringLiteral("Remove & undo"),
                                                QStringLiteral("Change"), QStringLiteral("Find"), QStringLiteral("View"),
