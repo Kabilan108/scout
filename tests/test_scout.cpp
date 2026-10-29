@@ -2116,8 +2116,12 @@ private slots:
         QCOMPARE(redact("line 2: map gw cd ~/work, then cd ~"), QStringLiteral("line 2: map gw cd ~/…, then cd ~"));
         QCOMPARE(redact("config: /home/you/.config/scout/scout.conf"), QStringLiteral("config: ~/.config/scout/scout.conf"));
         QCOMPARE(redact("config: ~/.config/scout/scout.conf.bak"), QStringLiteral("config: ~/…"));
-        QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with /home/you/a b"),
-                 QStringLiteral("reading ~/.config/scout/scout.conf with ~/…"));
+        QCOMPARE(redact("/home/you/.config/scout/scout.conf (old)/Clients/Acme"), QStringLiteral("~/…"));
+        QCOMPARE(report::redactHome(QStringLiteral("args [file:///home/you%20space/Clients/Acme]"), QStringLiteral("/home/you space"), {}),
+                 QStringLiteral("args [file://~/…]"));
+        QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with ``` inside"),
+                 QStringLiteral("reading ~/.config/scout/scout.conf with ``` inside"));
+        QCOMPARE(redact("reading /home/you/.config/scout/scout.conf with /home/you/a b"), QStringLiteral("reading ~/…"));
         QCOMPARE(redact("/home/youth/x /nix/store/home/you/x a~/b"), QStringLiteral("/home/youth/x /nix/store/home/you/x a~/b"));
     }
 

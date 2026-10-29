@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QRegularExpression>
+#include <QUrl>
 
 #include <optional>
 
@@ -145,6 +146,8 @@ QString report::build(const Environment &env, const CommandRegistry &commands, c
 QString report::redactHome(const QString &text, const QString &home, const QStringList &keep) {
     const QString root = QDir::cleanPath(home);
     const bool matchHome = !home.isEmpty() && root != QStringLiteral("/");
+    // As a file URL spells it, e.g. "/home/you%20space".
+    const QString encodedRoot = QString::fromLatin1(QUrl::toPercentEncoding(root, "/"));
     // Kept paths are matched whole first: they are known to end where a space and more words follow.
     QStringList keptTails;
     for (const QString &k : keep)
@@ -158,6 +161,8 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
         qsizetype prefix = 0;
         if (atBoundary && matchHome && QStringView(text).sliced(i).startsWith(root))
             prefix = root.size();
+        else if (atBoundary && matchHome && encodedRoot != root && QStringView(text).sliced(i).startsWith(encodedRoot, Qt::CaseInsensitive))
+            prefix = encodedRoot.size();
         else if (atBoundary && text[i] == u'~')
             prefix = 1;
         const qsizetype afterPrefix = i + prefix;
@@ -165,10 +170,13 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
             out += text[i++];
             continue;
         }
-        const QStringView after = QStringView(text).sliced(afterPrefix);
+        const qsizetype newline = text.indexOf(u'\n', afterPrefix);
+        const QStringView after = QStringView(text).sliced(afterPrefix, (newline < 0 ? text.size() : newline) - afterPrefix);
+        // A slash later on the line could mean the match was only the start of a longer path.
         qsizetype keptLength = -1;
         for (const QString &tail : std::as_const(keptTails))
-            if (tail.size() > keptLength && after.startsWith(tail) && (after.size() == tail.size() || !isPathChar(after[tail.size()])))
+            if (tail.size() > keptLength && after.startsWith(tail) && !after.sliced(tail.size()).contains(u'/') &&
+                (after.size() == tail.size() || !isPathChar(after[tail.size()])))
                 keptLength = tail.size();
         qsizetype end = afterPrefix;
         if (keptLength >= 0) {
@@ -176,10 +184,8 @@ QString report::redactHome(const QString &text, const QString &home, const QStri
         } else {
             // A delimiter can sit in a folder name too, as in "~/Clients (2026)/Acme", so the
             // path runs at least to the line's last slash; only a file name's tail can show.
-            if (end < text.size() && text[end] == u'/') {
-                const qsizetype newline = text.indexOf(u'\n', end);
+            if (end < text.size() && text[end] == u'/')
                 end = std::max(end, text.lastIndexOf(u'/', newline < 0 ? text.size() - 1 : newline));
-            }
             while (end < text.size() && !endsPath(text, end))
                 ++end;
         }
