@@ -33,8 +33,8 @@ QString checkCommand(const QStringList &words, const CommandRegistry &commands, 
     const CommandDef *def = commands.find(words.first());
     if (!def)
         return QStringLiteral("unknown command %1").arg(words.first());
-    if (def->requiresArgs && words.size() < 2 && !mapped)
-        return QStringLiteral("%1 needs %2").arg(def->name, def->usage);
+    if (def->requiresArgs && words.size() < 2)
+        return mapped ? QString() : QStringLiteral("%1 needs %2").arg(def->name, def->usage);
     if (def->name == QLatin1String("set"))
         return config::checkOption(words.value(1), words.mid(2).join(u' '));
     if (def->name == QLatin1String("map")) {

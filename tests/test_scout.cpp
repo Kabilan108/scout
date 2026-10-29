@@ -1561,7 +1561,8 @@ private slots:
                                                               "mkdir\n"
                                                               "map '' top\n"
                                                               "map zx ''\n"
-                                                              "map zs sort\n"),
+                                                              "map zs sort\n"
+                                                              "map zt set\n"),
                                                w.commands(), w.defaultKeys());
         const QStringList expected = {
             QStringLiteral("line 3: hidden takes true, false or toggle, not maybe"),
@@ -1585,8 +1586,9 @@ private slots:
                               QStringLiteral("line 12: unmap zq does nothing; zq isn't bound"),
                               QStringLiteral("line 15: map a overrides the default a (create)"),
                           }));
-        QCOMPARE(r.lines.size(), 18);
-        QVERIFY(r.lines.last().run); // a mapped command without arguments opens its prompt
+        QCOMPARE(r.lines.size(), 19);
+        // A mapped command without arguments opens its prompt.
+        QVERIFY(r.lines[17].run && r.lines[18].run);
         QVERIFY(r.lines[0].run);
         QVERIFY(!r.lines[1].run);
         QVERIFY(r.lines[6].run); // shadowing still binds
