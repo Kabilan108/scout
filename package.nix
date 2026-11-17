@@ -27,7 +27,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "scout";
-  version = "0.3.4";
+  version = "0.3.5";
 
   src = lib.fileset.toSource {
     root = ./.;
@@ -71,6 +71,8 @@ stdenv.mkDerivation {
     cmakeFlagsArray+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g1 -DNDEBUG")
   '';
 
+  # The PDF preview test runs the real pdftoppm.
+  nativeCheckInputs = [ poppler-utils ];
   doCheck = true;
   preCheck = ''
     export QT_QPA_PLATFORM=offscreen

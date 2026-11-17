@@ -22,6 +22,7 @@ public:
     void setImage(const QImage &image, const QString &path, const QString &caption);
     void clear();
     QString path() const { return m_path; }
+    bool hasImage() const { return !m_image.isNull(); }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -91,6 +92,7 @@ public:
     Kind kind() const { return m_kind; }
     QString path() const { return m_path; }
     QString text() const;
+    bool imageShown() const { return m_kind == Kind::Image && m_image->hasImage(); }
     ColumnView *dirView() const { return m_dirView; }
     DirModel *dirModel() const { return m_dirModel; }
     // Name to select when the previewed directory finishes loading.

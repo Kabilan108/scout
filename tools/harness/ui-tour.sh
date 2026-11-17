@@ -14,6 +14,19 @@ printf '# Notes\n\nSome *markdown* with a list:\n\n- one\n- two\n' > "$TREE/note
 printf 'plain text\n' > "$TREE/readme.txt"
 head -c 512 /dev/urandom > "$TREE/blob.bin"
 grim "$TREE/picture.png"
+cat > "$TREE/paper.pdf" << 'PDF'
+%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R
+  /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << >> stream
+BT /F1 28 Tf 40 90 Td (PDF page one) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+trailer << /Root 1 0 R >>
+%%EOF
+PDF
 
 tour() {
     local theme=$1
@@ -45,6 +58,9 @@ tour() {
     keys -k Escape -M ctrl k -m ctrl "show key" -k Return
     shot "$theme-12-keymap"
     keys -k Escape
+    quit_scout
+    launch "$BIN" "$TREE/paper.pdf"
+    shot "$theme-13-pdf-preview"
     quit_scout
 }
 

@@ -26,9 +26,13 @@
 #include <QJsonObject>
 #include <QMenu>
 #include <QMimeData>
+#include <QPainter>
+#include <QPdfWriter>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -366,6 +370,35 @@ private slots:
         QTest::qWait(50);
         QVERIFY(preview.text().contains(QStringLiteral("Heading")) || preview.text().contains(QStringLiteral("doc")) ||
                 preview.text().contains(QStringLiteral("comment")));
+    }
+
+    void pdfPreviewRendersWithoutWritingFiles() {
+        // Given an output root, even "-", pdftoppm writes "<root>.png" into its
+        // working directory, which for scout is usually the user's home.
+        if (QStandardPaths::findExecutable(QStringLiteral("pdftoppm")).isEmpty())
+            QSKIP("pdftoppm is not installed");
+        const QString base = makeTree();
+        const QString pdf = base + QStringLiteral("/doc.pdf");
+        {
+            QPdfWriter writer(pdf);
+            QPainter painter(&writer);
+            painter.drawText(QPointF(200, 200), QStringLiteral("page one"));
+        }
+        const QString work = base + QStringLiteral("/work");
+        QVERIFY(QDir().mkpath(work));
+        const QString previous = QDir::currentPath();
+        QVERIFY(QDir::setCurrent(work));
+        const auto restore = qScopeGuard([&] { QDir::setCurrent(previous); });
+
+        Marks marks;
+        Preview preview(&marks);
+        preview.resize(600, 400);
+        preview.show();
+        preview.showEntry(statEntry(pdf));
+        QCOMPARE(preview.kind(), Preview::Kind::Image);
+        QTRY_VERIFY_WITH_TIMEOUT(preview.imageShown() || preview.kind() != Preview::Kind::Image, 15000);
+        QVERIFY(preview.imageShown());
+        QCOMPARE(QDir(work).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot), QStringList());
     }
 
     void navigationAndPreview() {

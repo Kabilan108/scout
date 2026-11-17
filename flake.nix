@@ -60,6 +60,7 @@
             gdb
             (lib.getBin glib)
             grim
+            poppler-utils
             sway
             wtype
           ];

@@ -377,7 +377,7 @@ void Preview::showEntry(const FileEntry &entry) {
         showProcessImage(entry, QStringLiteral("pdftoppm"),
                          {QStringLiteral("-png"), QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
                           QStringLiteral("1"), QStringLiteral("-scale-to"), QString::number(std::max(t.width(), t.height())),
-                          QStringLiteral("-singlefile"), entry.path, QStringLiteral("-")});
+                          QStringLiteral("-singlefile"), entry.path});
         return;
     }
     if (mime.name().startsWith(QLatin1String("video/")) &&
