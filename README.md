@@ -61,7 +61,7 @@ sheet grouped by task, built from your current bindings.
 | `o` | open with… (recommended apps first, then everything else) |
 | `zh` / `Ctrl-h` | toggle hidden files |
 | `sn` `ss` `sm` `se` `sr` | sort by name, size, modified, extension; reverse |
-| `J` `K` | scroll the preview |
+| `J` `K` | scroll the preview, or turn the page of a PDF |
 | `T` | terminal in this folder |
 | `w` | tasks: progress of copies and moves (`x` cancels) |
 | `Alt-Enter` | properties under the preview, following the cursor (again, or `Esc`, closes) |
@@ -148,9 +148,16 @@ can copy in one and paste in the other.
 ## Previews
 
 Folders, text with syntax highlighting (KDE's syntax-highlighting library),
-images, archives (libarchive), the first page of PDFs (`pdftoppm`), video
-thumbnails (`ffmpegthumbnailer`), a hex dump for binaries, and an info card
-for everything else.
+images, archives (libarchive), PDFs (`pdftoppm`), video thumbnails
+(`ffmpegthumbnailer`), a hex dump for binaries, and an info card for everything
+else.
+
+- Images cover whatever Qt and KImageFormats read: PNG, JPEG, WebP, AVIF, HEIF,
+  JPEG XL, SVG and more. Animated WebP and GIF play while they're previewed.
+- SVGs render at the size of the pane, so small icons come out sharp.
+- A checkerboard shows through transparent images.
+- PDFs open on the first page; `J` and `K` turn pages, and the caption shows
+  the page and the count (from `pdfinfo`).
 
 ## Theme
 

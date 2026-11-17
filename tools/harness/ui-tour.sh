@@ -17,16 +17,26 @@ grim "$TREE/picture.png"
 cat > "$TREE/paper.pdf" << 'PDF'
 %PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
-2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >> endobj
 3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R
   /Resources << /Font << /F1 5 0 R >> >> >> endobj
 4 0 obj << >> stream
 BT /F1 28 Tf 40 90 Td (PDF page one) Tj ET
 endstream endobj
 5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+6 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 7 0 R
+  /Resources << /Font << /F1 5 0 R >> >> >> endobj
+7 0 obj << >> stream
+BT /F1 28 Tf 40 90 Td (PDF page two) Tj ET
+endstream endobj
 trailer << /Root 1 0 R >>
 %%EOF
 PDF
+# Black strokes on a transparent background, 24x24: shows the checkerboard and
+# that small SVGs are drawn at the pane's size.
+printf '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M4 20 L12 4 L20 20 Z" stroke="#000" stroke-width="1.5" fill="none"/></svg>\n' > "$TREE/icon.svg"
+# Two 8x8 frames, red then blue, looping.
+printf '\x47\x49\x46\x38\x39\x61\x08\x00\x08\x00\xf0\x00\x00\xff\x00\x00\x00\x00\x00\x21\xff\x0b\x4e\x45\x54\x53\x43\x41\x50\x45\x32\x2e\x30\x03\x01\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00\x2c\x00\x00\x00\x00\x08\x00\x08\x00\x00\x02\x07\x84\x8f\xa9\xcb\xed\x5d\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00\x2c\x00\x00\x00\x00\x08\x00\x08\x00\x80\x00\x00\xff\x00\x00\x00\x02\x07\x84\x8f\xa9\xcb\xed\x5d\x00\x00\x3b' > "$TREE/blink.gif"
 
 tour() {
     local theme=$1
@@ -61,6 +71,15 @@ tour() {
     quit_scout
     launch "$BIN" "$TREE/paper.pdf"
     shot "$theme-13-pdf-preview"
+    keys J
+    shot "$theme-14-pdf-page-two" 1.5
+    quit_scout
+    launch "$BIN" "$TREE/icon.svg"
+    shot "$theme-15-svg-checkerboard"
+    quit_scout
+    launch "$BIN" "$TREE/blink.gif"
+    shot "$theme-16-gif-frame-a" 0.1
+    shot "$theme-17-gif-frame-b" 0.05
     quit_scout
 }
 

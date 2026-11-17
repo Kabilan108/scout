@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QMovie>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProcess>
@@ -20,9 +21,13 @@ class ImageView : public QWidget {
 public:
     using QWidget::QWidget;
     void setImage(const QImage &image, const QString &path, const QString &caption);
+    void setFrame(const QImage &image);
+    void setCaption(const QString &caption);
     void clear();
     QString path() const { return m_path; }
     bool hasImage() const { return !m_image.isNull(); }
+    QImage image() const { return m_image; }
+    QString caption() const { return m_caption; }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -79,6 +84,7 @@ public:
     enum class Kind { None, Directory, Text, Image, Info };
 
     Preview(Marks *marks, QWidget *parent = nullptr);
+    ~Preview() override;
 
     void showEntry(const FileEntry &entry);
     void clear();
@@ -93,17 +99,33 @@ public:
     QString path() const { return m_path; }
     QString text() const;
     bool imageShown() const { return m_kind == Kind::Image && m_image->hasImage(); }
+    ImageView *imageView() const { return m_image; }
+    bool isAnimating() const { return m_movie && m_movie->state() == QMovie::Running; }
+    // Moves a PDF preview `delta` pages, stopping at the first and last page.
+    // False when the preview isn't a PDF with a known page count.
+    bool turnPage(int delta);
+    int pdfPage() const { return m_pdfPage; }
+    int pdfPages() const { return m_pdfPages; }
     ColumnView *dirView() const { return m_dirView; }
     DirModel *dirModel() const { return m_dirModel; }
     // Name to select when the previewed directory finishes loading.
     void setDirCursorHint(const QString &name) { m_dirCursorHint = name; }
 
+protected:
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
+
 private:
+    void stopBackgroundWork();
     void showText(const QString &text, const QString &path, bool highlight);
     void replaceText(const QString &text, const KSyntaxHighlighting::Definition &def);
     void showImageAsync(const FileEntry &entry);
     void showArchiveAsync(const FileEntry &entry);
     void showProcessImage(const FileEntry &entry, const QString &program, const QStringList &args);
+    void startAnimation(const QString &path, QSize scaledSize);
+    void showPdf(const FileEntry &entry);
+    void renderPdfPage();
+    QString pdfCaption() const;
     void showInfo(const FileEntry &entry, const QString &note = {});
     QSize imageTargetSize() const;
 
@@ -115,6 +137,11 @@ private:
     KSyntaxHighlighting::Repository m_repo;
     KSyntaxHighlighting::SyntaxHighlighter *m_highlighter;
     QPointer<QProcess> m_process;
+    QPointer<QProcess> m_infoProcess;
+    QPointer<QMovie> m_movie;
+    FileEntry m_pdf;
+    int m_pdfPage = 0;
+    int m_pdfPages = 0;
     Kind m_kind = Kind::None;
     bool m_lineNumbers = true;
     bool m_textFile = false; // the text page shows a file's text, not a hex dump or listing
