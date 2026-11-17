@@ -22,6 +22,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QImageReader>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMenu>
@@ -399,6 +400,147 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(preview.imageShown() || preview.kind() != Preview::Kind::Image, 15000);
         QVERIFY(preview.imageShown());
         QCOMPARE(QDir(work).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot), QStringList());
+    }
+
+    static QColor centerPixel(const QImage &image) { return image.pixelColor(image.width() / 2, image.height() / 2); }
+
+    static bool near(const QColor &a, const QColor &b) {
+        return std::abs(a.red() - b.red()) < 40 && std::abs(a.green() - b.green()) < 40 && std::abs(a.blue() - b.blue()) < 40;
+    }
+
+    void svgPreviewsFillThePane() {
+        QVERIFY2(QImageReader::supportedImageFormats().contains("svg"), "Qt's SVG image plugin is missing");
+        const QString base = makeTree();
+        writeFile(base + QStringLiteral("/icon.svg"),
+                  "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"12\" viewBox=\"0 0 24 12\">"
+                  "<rect width=\"24\" height=\"12\" fill=\"#00ff00\"/></svg>");
+        Marks marks;
+        Preview preview(&marks);
+        preview.resize(600, 400);
+        preview.show();
+        preview.showEntry(statEntry(base + QStringLiteral("/icon.svg")));
+        QCOMPARE(preview.kind(), Preview::Kind::Image);
+        QTRY_VERIFY(!preview.imageView()->image().isNull());
+        const QImage image = preview.imageView()->image();
+        QVERIFY2(image.width() >= 400, qPrintable(QString::number(image.width())));
+        QCOMPARE(image.width(), image.height() * 2);
+        QVERIFY(preview.imageView()->caption().contains(QStringLiteral("24×12")));
+    }
+
+    void transparentImagesSitOnACheckerboard() {
+        const QString base = makeTree();
+        QImage clear(64, 64, QImage::Format_ARGB32);
+        clear.fill(Qt::transparent);
+        QVERIFY(clear.save(base + QStringLiteral("/clear.png")));
+        Marks marks;
+        Preview preview(&marks);
+        preview.resize(600, 400);
+        preview.show();
+        preview.showEntry(statEntry(base + QStringLiteral("/clear.png")));
+        QTRY_VERIFY(!preview.imageView()->image().isNull());
+        const QImage shot = preview.imageView()->grab().toImage();
+        const QPoint center(shot.width() / 2, (shot.height() - 40) / 2);
+        QSet<QRgb> colors;
+        for (int y = -16; y < 16; ++y)
+            for (int x = -16; x < 16; ++x)
+                colors.insert(shot.pixel(center + QPoint(x, y)));
+        QCOMPARE(colors.size(), 2);
+        QVERIFY(!colors.contains(Theme::p().base.rgb()));
+    }
+
+    void animatedGifsPlayWhilePreviewed() {
+        const QString base = makeTree();
+        // Two 8×8 frames, red then blue, 50 ms each, looping.
+        writeFile(base + QStringLiteral("/two.gif"),
+                  QByteArray("\x47\x49\x46\x38\x39\x61\x08\x00\x08\x00\xf0\x00\x00\xff\x00\x00\x00\x00\x00\x21\xff\x0b\x4e"
+                             "\x45\x54\x53\x43\x41\x50\x45\x32\x2e\x30\x03\x01\x00\x00\x00\x21\xf9\x04\x00\x05\x00\x00\x00"
+                             "\x2c\x00\x00\x00\x00\x08\x00\x08\x00\x00\x02\x07\x84\x8f\xa9\xcb\xed\x5d\x00\x00\x21\xf9\x04"
+                             "\x00\x05\x00\x00\x00\x2c\x00\x00\x00\x00\x08\x00\x08\x00\x80\x00\x00\xff\x00\x00\x00\x02\x07"
+                             "\x84\x8f\xa9\xcb\xed\x5d\x00\x00\x3b",
+                             101));
+        Marks marks;
+        Preview preview(&marks);
+        preview.resize(600, 400);
+        preview.show();
+        preview.showEntry(statEntry(base + QStringLiteral("/two.gif")));
+        QTRY_VERIFY(preview.isAnimating());
+        QVERIFY(preview.imageView()->caption().contains(QStringLiteral("2 frames")));
+        QTRY_VERIFY(near(centerPixel(preview.imageView()->image()), Qt::red));
+        QTRY_VERIFY(near(centerPixel(preview.imageView()->image()), Qt::blue));
+        QTRY_VERIFY(near(centerPixel(preview.imageView()->image()), Qt::red));
+
+        preview.hide();
+        QVERIFY(!preview.isAnimating());
+        preview.show();
+        QVERIFY(preview.isAnimating());
+
+        preview.showEntry(statEntry(base + QStringLiteral("/notes.md")));
+        QVERIFY(!preview.isAnimating());
+        QCOMPARE(preview.kind(), Preview::Kind::Text);
+    }
+
+    void pdfPreviewsTurnPagesWithJK() {
+        QVERIFY2(!QStandardPaths::findExecutable(QStringLiteral("pdftoppm")).isEmpty(), "pdftoppm (poppler-utils) is not on PATH");
+        QVERIFY2(!QStandardPaths::findExecutable(QStringLiteral("pdfinfo")).isEmpty(), "pdfinfo (poppler-utils) is not on PATH");
+        const QString base = makeTree();
+        const QString pdf = base + QStringLiteral("/doc.pdf");
+        const QList<QColor> pages = {Qt::red, Qt::green, Qt::blue};
+        {
+            QPdfWriter writer(pdf);
+            QPainter painter(&writer);
+            for (qsizetype i = 0; i < pages.size(); ++i) {
+                if (i > 0)
+                    writer.newPage();
+                painter.fillRect(painter.viewport(), pages[i]);
+            }
+        }
+        // Closing while pdftoppm and pdfinfo still run must not call back into the preview.
+        for (int i = 0; i < 5; ++i) {
+            Marks marks;
+            Preview closing(&marks);
+            closing.resize(600, 400);
+            closing.show();
+            closing.showEntry(statEntry(pdf));
+            QVERIFY(closing.turnPage(1) || closing.pdfPages() == 0);
+        }
+
+        MainWindow w(base, false);
+        w.show();
+        QTRY_VERIFY(w.isIdle());
+        w.cd(pdf);
+        QTRY_VERIFY(w.isIdle());
+        Preview *preview = w.preview();
+        QCOMPARE(preview->kind(), Preview::Kind::Image);
+        QTRY_VERIFY(!preview->imageView()->image().isNull());
+        QVERIFY(near(centerPixel(preview->imageView()->image()), Qt::red));
+        QTRY_COMPARE(preview->pdfPages(), 3);
+        QVERIFY(preview->imageView()->caption().endsWith(QStringLiteral("page 1 of 3")));
+
+        keys(w, QStringLiteral("J"));
+        QCOMPARE(preview->pdfPage(), 2);
+        QTRY_VERIFY(near(centerPixel(preview->imageView()->image()), Qt::green));
+        keys(w, QStringLiteral("5J"));
+        QCOMPARE(preview->pdfPage(), 3);
+        QTRY_VERIFY(near(centerPixel(preview->imageView()->image()), Qt::blue));
+        QVERIFY(preview->imageView()->caption().endsWith(QStringLiteral("page 3 of 3")));
+        // Turns faster than pdftoppm renders: only the last one may land.
+        keys(w, QStringLiteral("KKJK"));
+        QCOMPARE(preview->pdfPage(), 1);
+        QTRY_VERIFY(near(centerPixel(preview->imageView()->image()), Qt::red));
+        QTest::qWait(300);
+        QVERIFY(near(centerPixel(preview->imageView()->image()), Qt::red));
+        QCOMPARE(preview->kind(), Preview::Kind::Image);
+
+        // Another file starts over; coming back opens on page 1.
+        keys(w, QStringLiteral("J"));
+        QCOMPARE(preview->pdfPage(), 2);
+        w.cd(base + QStringLiteral("/notes.md"));
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(preview->pdfPages(), 0);
+        QVERIFY(!preview->turnPage(1));
+        w.cd(pdf);
+        QTRY_VERIFY(w.isIdle());
+        QCOMPARE(preview->pdfPage(), 1);
     }
 
     void navigationAndPreview() {

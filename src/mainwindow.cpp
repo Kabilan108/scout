@@ -2204,13 +2204,17 @@ void MainWindow::registerCommands() {
         }
         applyOptions();
     }, QStringLiteral("<key>"), true);
-    cmd(QStringLiteral("preview-down"), QStringLiteral("Scroll the preview down"), [this](const CommandContext &c) {
+    cmd(QStringLiteral("preview-down"), QStringLiteral("Scroll the preview down, or turn to the next PDF page"), [this](const CommandContext &c) {
+        if (m_preview->turnPage(c.countOr(1)))
+            return;
         if (auto *text = qobject_cast<QPlainTextEdit *>(m_preview->currentWidget()))
             text->verticalScrollBar()->setValue(text->verticalScrollBar()->value() + c.countOr(1) * 10);
         else if (m_preview->currentWidget() == m_preview->dirView())
             m_preview->dirView()->verticalScrollBar()->setValue(m_preview->dirView()->verticalScrollBar()->value() + c.countOr(1) * 10 * Theme::instance().rowHeight());
     });
-    cmd(QStringLiteral("preview-up"), QStringLiteral("Scroll the preview up"), [this](const CommandContext &c) {
+    cmd(QStringLiteral("preview-up"), QStringLiteral("Scroll the preview up, or turn to the previous PDF page"), [this](const CommandContext &c) {
+        if (m_preview->turnPage(-c.countOr(1)))
+            return;
         if (auto *text = qobject_cast<QPlainTextEdit *>(m_preview->currentWidget()))
             text->verticalScrollBar()->setValue(text->verticalScrollBar()->value() - c.countOr(1) * 10);
         else if (m_preview->currentWidget() == m_preview->dirView())

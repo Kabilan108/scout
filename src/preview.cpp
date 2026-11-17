@@ -13,6 +13,7 @@
 #include <QMimeDatabase>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QStringDecoder>
@@ -131,6 +132,7 @@ struct LoadedImage {
     QImage image;
     QSize original;
     QString error;
+    int frames = 1;
 };
 
 LoadedImage loadImage(const QString &path, QSize target) {
@@ -138,8 +140,14 @@ LoadedImage loadImage(const QString &path, QSize target) {
     QImageReader reader(path);
     reader.setAutoTransform(true);
     out.original = reader.size();
-    if (out.original.isValid() && target.isValid() &&
-        (out.original.width() > target.width() || out.original.height() > target.height())) {
+    if (reader.supportsAnimation())
+        out.frames = std::max(1, reader.imageCount());
+    // Vector images render sharp at any size, so small ones grow to fill the pane.
+    const bool vector = reader.format().startsWith("svg");
+    if (vector && out.original.isValid() && target.isValid()) {
+        reader.setScaledSize(out.original.scaled(target, Qt::KeepAspectRatio));
+    } else if (out.original.isValid() && target.isValid() &&
+               (out.original.width() > target.width() || out.original.height() > target.height())) {
         QSize scaled = out.original;
         // Orientation may swap axes; fit against the larger box to be safe.
         scaled.scale(target.expandedTo(target.transposed()), Qt::KeepAspectRatio);
@@ -151,11 +159,40 @@ LoadedImage loadImage(const QString &path, QSize target) {
     return out;
 }
 
+// Shows where a transparent image is see-through, and keeps dark art visible on
+// a dark theme and light art on a light one.
+void paintCheckerboard(QPainter *p, const QRectF &area, const Palette &pal) {
+    constexpr int cell = 8;
+    const QColor light = Palette::mix(pal.surface, pal.overlay, 0.5);
+    const QRect cells = area.toAlignedRect();
+    p->save();
+    p->setClipRect(area);
+    p->fillRect(cells, pal.surface);
+    for (int y = cells.top(), row = 0; y <= cells.bottom(); y += cell, ++row)
+        for (int x = cells.left() + (row % 2) * cell; x <= cells.right(); x += 2 * cell)
+            p->fillRect(x, y, cell, cell, light);
+    p->restore();
+}
+
+QString pageCaption(int page, int pages) {
+    return pages > 0 ? QStringLiteral("page %1 of %2").arg(page).arg(pages) : QStringLiteral("page %1").arg(page);
+}
+
 } // namespace
 
 void ImageView::setImage(const QImage &image, const QString &path, const QString &caption) {
     m_image = image;
     m_path = path;
+    m_caption = caption;
+    update();
+}
+
+void ImageView::setFrame(const QImage &image) {
+    m_image = image;
+    update();
+}
+
+void ImageView::setCaption(const QString &caption) {
     m_caption = caption;
     update();
 }
@@ -180,6 +217,8 @@ void ImageView::paintEvent(QPaintEvent *) {
             size.scale(area.size(), Qt::KeepAspectRatio);
         const QRectF target(area.x() + (area.width() - size.width()) / 2,
                             area.y() + (area.height() - size.height()) / 2, size.width(), size.height());
+        if (m_image.hasAlphaChannel())
+            paintCheckerboard(&p, target, pal);
         p.setRenderHint(QPainter::SmoothPixmapTransform);
         p.drawImage(target, m_image);
     }
@@ -277,6 +316,18 @@ Preview::Preview(Marks *marks, QWidget *parent) : QStackedWidget(parent) {
     applyTheme();
 }
 
+Preview::~Preview() {
+    // ~QWidget deletes children while this preview's connections are still live,
+    // and a QProcess destroyed while running reports finishing; its handlers must
+    // not run against a half-destroyed preview.
+    for (QProcess *proc : findChildren<QProcess *>(Qt::FindDirectChildrenOnly)) {
+        proc->disconnect(this);
+        proc->kill();
+        proc->waitForFinished(1000);
+        delete proc;
+    }
+}
+
 void Preview::applyTheme() {
     const Palette &pal = Theme::p();
     QPalette tp = m_text->palette();
@@ -318,12 +369,34 @@ QSize Preview::imageTargetSize() const {
     return s.boundedTo(QSize(2560, 2560));
 }
 
-void Preview::clear() {
+void Preview::stopBackgroundWork() {
     ++m_generation;
-    m_kind = Kind::None;
-    m_path.clear();
     if (m_process)
         m_process->kill();
+    if (m_infoProcess)
+        m_infoProcess->kill();
+    delete m_movie;
+    m_pdf = {};
+    m_pdfPage = 0;
+    m_pdfPages = 0;
+}
+
+void Preview::showEvent(QShowEvent *event) {
+    QStackedWidget::showEvent(event);
+    if (m_movie && m_movie->state() == QMovie::Paused)
+        m_movie->setPaused(false);
+}
+
+void Preview::hideEvent(QHideEvent *event) {
+    QStackedWidget::hideEvent(event);
+    if (m_movie)
+        m_movie->setPaused(true);
+}
+
+void Preview::clear() {
+    stopBackgroundWork();
+    m_kind = Kind::None;
+    m_path.clear();
     m_dirModel->clearPath();
     m_image->clear();
     m_info->setEntry({}, {});
@@ -336,9 +409,7 @@ void Preview::showEntry(const FileEntry &entry) {
             m_dirModel->setPath(entry.path);
         return;
     }
-    ++m_generation;
-    if (m_process)
-        m_process->kill();
+    stopBackgroundWork();
     m_path = entry.path;
 
     if (entry.isDir) {
@@ -373,11 +444,7 @@ void Preview::showEntry(const FileEntry &entry) {
         return;
     }
     if (mime.inherits(QStringLiteral("application/pdf")) && !QStandardPaths::findExecutable(QStringLiteral("pdftoppm")).isEmpty()) {
-        const QSize t = imageTargetSize();
-        showProcessImage(entry, QStringLiteral("pdftoppm"),
-                         {QStringLiteral("-png"), QStringLiteral("-f"), QStringLiteral("1"), QStringLiteral("-l"),
-                          QStringLiteral("1"), QStringLiteral("-scale-to"), QString::number(std::max(t.width(), t.height())),
-                          QStringLiteral("-singlefile"), entry.path});
+        showPdf(entry);
         return;
     }
     if (mime.name().startsWith(QLatin1String("video/")) &&
@@ -474,11 +541,119 @@ void Preview::showImageAsync(const FileEntry &entry) {
                 self->showInfo(entry, loaded.error);
                 return;
             }
-            const QString caption = loaded.original.isValid()
-                                        ? QStringLiteral("%1 · %2×%3").arg(captionBase).arg(loaded.original.width()).arg(loaded.original.height())
-                                        : captionBase;
+            QString caption = loaded.original.isValid()
+                                  ? QStringLiteral("%1 · %2×%3").arg(captionBase).arg(loaded.original.width()).arg(loaded.original.height())
+                                  : captionBase;
+            if (loaded.frames > 1)
+                caption += QStringLiteral(" · %1 frames").arg(loaded.frames);
             self->m_image->setImage(loaded.image, path, caption);
+            if (loaded.frames > 1)
+                self->startAnimation(path, loaded.image.size());
         });
+}
+
+void Preview::startAnimation(const QString &path, QSize scaledSize) {
+    auto *movie = new QMovie(path, QByteArray(), this);
+    if (!movie->isValid()) {
+        delete movie;
+        return;
+    }
+    m_movie = movie;
+    movie->setScaledSize(scaledSize);
+    connect(movie, &QMovie::frameChanged, this, [this, movie] { m_image->setFrame(movie->currentImage()); });
+    movie->start();
+    if (!isVisible())
+        movie->setPaused(true);
+}
+
+QString Preview::pdfCaption() const {
+    return QStringLiteral("%1 · %2 · %3 · %4")
+        .arg(m_pdf.name, humanSize(m_pdf.size), formatTime(m_pdf.mtime), pageCaption(m_pdfPage, m_pdfPages));
+}
+
+void Preview::showPdf(const FileEntry &entry) {
+    m_kind = Kind::Image;
+    m_pdf = entry;
+    m_pdfPage = 1;
+    m_pdfPages = 0;
+    m_image->setImage({}, entry.path, pdfCaption());
+    setCurrentWidget(m_image);
+    renderPdfPage();
+
+    if (QStandardPaths::findExecutable(QStringLiteral("pdfinfo")).isEmpty())
+        return;
+    const quint64 generation = m_generation;
+    auto *proc = new QProcess(this);
+    m_infoProcess = proc;
+    connect(proc, &QProcess::finished, this, [this, proc, generation](int code, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        if (generation != m_generation || status != QProcess::NormalExit || code != 0)
+            return;
+        const QString info = QString::fromUtf8(proc->readAllStandardOutput());
+        static const QRegularExpression pagesLine(QStringLiteral("^Pages:\\s+(\\d+)\\s*$"), QRegularExpression::MultilineOption);
+        const int pages = pagesLine.match(info).captured(1).toInt();
+        if (pages <= 0)
+            return;
+        m_pdfPages = pages;
+        m_image->setCaption(pdfCaption());
+    });
+    connect(proc, &QProcess::errorOccurred, proc, &QObject::deleteLater);
+    proc->start(QStringLiteral("pdfinfo"), {entry.path});
+}
+
+bool Preview::turnPage(int delta) {
+    if (m_kind != Kind::Image || m_pdfPages <= 0)
+        return false;
+    const int page = std::clamp(m_pdfPage + delta, 1, m_pdfPages);
+    if (page != m_pdfPage) {
+        m_pdfPage = page;
+        m_image->setCaption(pdfCaption());
+        renderPdfPage();
+    }
+    return true;
+}
+
+void Preview::renderPdfPage() {
+    if (m_process)
+        m_process->kill();
+    const quint64 generation = m_generation;
+    const int page = m_pdfPage;
+    const QSize t = imageTargetSize();
+    auto *proc = new QProcess(this);
+    m_process = proc;
+    auto fail = [this, page] {
+        if (page == 1) {
+            showInfo(m_pdf, QStringLiteral("no preview available"));
+            return;
+        }
+        m_image->setImage({}, m_pdf.path, pdfCaption() + QStringLiteral(" · can't render this page"));
+    };
+    connect(proc, &QProcess::finished, this, [this, proc, generation, fail](int code, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        // A killed render of an earlier page turn finishes late; only the latest counts.
+        if (generation != m_generation || proc != m_process)
+            return;
+        QImage image;
+        if (status == QProcess::NormalExit && code == 0)
+            image.loadFromData(proc->readAllStandardOutput());
+        if (image.isNull()) {
+            fail();
+            return;
+        }
+        m_image->setImage(image, m_pdf.path, pdfCaption());
+    });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, generation, fail](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        proc->deleteLater();
+        if (generation == m_generation && proc == m_process)
+            fail();
+    });
+    const QString pageArg = QString::number(page);
+    // No output root: given one, even "-", pdftoppm writes a file instead of stdout.
+    proc->start(QStringLiteral("pdftoppm"),
+                {QStringLiteral("-png"), QStringLiteral("-f"), pageArg, QStringLiteral("-l"), pageArg, QStringLiteral("-scale-to"),
+                 QString::number(std::max(t.width(), t.height())), QStringLiteral("-singlefile"), m_pdf.path});
 }
 
 void Preview::showArchiveAsync(const FileEntry &entry) {

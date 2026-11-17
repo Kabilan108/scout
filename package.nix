@@ -27,7 +27,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "scout";
-  version = "0.3.5";
+  version = "0.3.6";
 
   src = lib.fileset.toSource {
     root = ./.;
@@ -71,7 +71,7 @@ stdenv.mkDerivation {
     cmakeFlagsArray+=("-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g1 -DNDEBUG")
   '';
 
-  # The PDF preview test runs the real pdftoppm.
+  # The PDF preview tests run the real pdftoppm and pdfinfo.
   nativeCheckInputs = [ poppler-utils ];
   doCheck = true;
   preCheck = ''
@@ -79,6 +79,8 @@ stdenv.mkDerivation {
     export HOME=$(mktemp -d)
     export XDG_DATA_HOME=$HOME/.local/share
     export XDG_STATE_HOME=$HOME/.local/state
+    # The image preview tests need the same plugins the binary bakes in.
+    export QT_PLUGIN_PATH=${lib.concatStringsSep ":" pluginDirs}
   '';
 
   postFixup = ''
